@@ -136,59 +136,94 @@ def scrape(limit: int = 0, resume: bool = True) -> None:
             except Exception:
                 pass
 
-        # ── Collect post links (use cache if available) ───────────────────────
+        # ── Collect post links ────────────────────────────────────────────────
+        # Always check recent posts (first few scrolls) to catch new publications,
+        # then merge with cached links for the full historical backlog.
         post_urls: list[str] = []
+        cached_urls: list[str] = []
 
         if os.path.exists(LINKS_CACHE) and not limit:
             with open(LINKS_CACHE, encoding="utf-8") as f:
-                post_urls = json.load(f)
-            print(f"Links cargados desde cache: {len(post_urls)}")
+                cached_urls = json.load(f)
+            print(f"Links en cache: {len(cached_urls)}")
+
+        # Scroll the profile to find recent posts (always, even with cache)
+        seen_urls: set[str] = set()
+        no_new_count = 0
+        recent_urls: list[str] = []
+        max_recent_scrolls = 6 if cached_urls else 0  # ~72 posts = ~2.5 months of daily posts
+
+        if cached_urls:
+            print("Buscando posts nuevos (scrolling reciente)...")
         else:
-            seen_urls: set[str] = set()
-            no_new_count = 0
+            print("Recolectando todos los links de posts (scrolling completo)...")
 
-            print("Recolectando links de posts (scrolling)...")
-            while True:
-                anchors = page.locator("a[href*='/p/']").all()
-                new_found = 0
-                for a in anchors:
-                    try:
-                        href = a.get_attribute("href")
-                        if href and "/p/" in href:
-                            m = re.search(r"/p/([A-Za-z0-9_-]+)/", href)
-                            if m:
-                                sc = m.group(1)
-                                if sc not in seen_urls:
-                                    seen_urls.add(sc)
-                                    post_urls.append(f"https://www.instagram.com/p/{sc}/")
-                                    new_found += 1
-                    except Exception:
-                        pass
+        scroll_count = 0
+        while True:
+            anchors = page.locator("a[href*='/p/']").all()
+            new_found = 0
+            for a in anchors:
+                try:
+                    href = a.get_attribute("href")
+                    if href and "/p/" in href:
+                        m = re.search(r"/p/([A-Za-z0-9_-]+)/", href)
+                        if m:
+                            sc = m.group(1)
+                            if sc not in seen_urls:
+                                seen_urls.add(sc)
+                                recent_urls.append(f"https://www.instagram.com/p/{sc}/")
+                                new_found += 1
+                except Exception:
+                    pass
 
-                print(f"  Links encontrados: {len(post_urls)}", end="\r")
+            print(f"  Links encontrados: {len(recent_urls)}", end="\r")
 
-                if limit and len(post_urls) >= limit:
-                    post_urls = post_urls[:limit]
+            if limit and len(recent_urls) >= limit:
+                recent_urls = recent_urls[:limit]
+                break
+
+            scroll_count += 1
+            # If we have a cache, only scroll a few times to catch new posts
+            if cached_urls and scroll_count >= max_recent_scrolls:
+                break
+
+            if new_found == 0:
+                no_new_count += 1
+                if no_new_count >= 4:
                     break
+            else:
+                no_new_count = 0
 
-                if new_found == 0:
-                    no_new_count += 1
-                    if no_new_count >= 4:
-                        break
-                else:
-                    no_new_count = 0
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            time.sleep(SCROLL_PAUSE)
 
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                time.sleep(SCROLL_PAUSE)
+        # Merge: recent posts first (newest), then cached posts not already seen
+        cached_set = set()
+        for url in cached_urls:
+            m = re.search(r"/p/([A-Za-z0-9_-]+)/", url)
+            if m:
+                cached_set.add(m.group(1))
 
-            print(f"\nTotal links: {len(post_urls)}")
+        new_count = sum(1 for url in recent_urls
+                        if re.search(r"/p/([A-Za-z0-9_-]+)/", url).group(1) not in cached_set)
 
-            # Save links cache so restarts don't need to re-scroll
-            if not limit:
-                os.makedirs(os.path.dirname(LINKS_CACHE), exist_ok=True)
-                with open(LINKS_CACHE, "w", encoding="utf-8") as f:
-                    json.dump(post_urls, f)
-                print(f"Links guardados en cache: {LINKS_CACHE}")
+        # Build final list: recent first, then append cached that weren't in recent
+        post_urls = list(recent_urls)
+        for url in cached_urls:
+            m = re.search(r"/p/([A-Za-z0-9_-]+)/", url)
+            if m and m.group(1) not in seen_urls:
+                post_urls.append(url)
+
+        if new_count > 0:
+            print(f"\n{new_count} posts NUEVOS detectados")
+        print(f"Total links: {len(post_urls)}")
+
+        # Update cache with merged list
+        if not limit:
+            os.makedirs(os.path.dirname(LINKS_CACHE), exist_ok=True)
+            with open(LINKS_CACHE, "w", encoding="utf-8") as f:
+                json.dump(post_urls, f)
+            print(f"Cache actualizado: {LINKS_CACHE}")
 
         # ── Visit each post ───────────────────────────────────────────────────
         import random

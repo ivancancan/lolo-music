@@ -36,7 +36,7 @@ from catalog import (
 )
 from price_history import PriceHistory
 from deal_score import compute_deal_score, verdict_emoji, VERDICT_BUY, VERDICT_REVIEW
-from notifier import send_telegram_message
+from notifier import send_telegram_message, send_telegram_photo
 
 warnings.filterwarnings("ignore")
 
@@ -376,6 +376,7 @@ def evaluate_match(
         "on_sale":             us_item.get("on_sale", False),
         "discount_pct":        us_item.get("discount_pct", 0.0),
         "us_url":              us_url,
+        "image_url":           us_item.get("image_url", ""),
         "us_source":           us_item.get("source", "unknown"),
         "us_condition":        us_item.get("condition", ""),
         "benchmark_usd":       round(benchmark_usd, 2),
@@ -469,8 +470,30 @@ def main() -> None:
     gc_items   = []
     samash_items = []
 
+    # ── Scrape Guitar's Home (reactive mode) — must run BEFORE Reverb
+    # so we can build dynamic queries from GH titles ──────────────────────
+    print("\nScraping Guitar's Home...")
+    gh_items = scrape_guitarshome()
+    print(f"Guitar's Home: {len(gh_items)} guitarras")
+
+    # Build dynamic Reverb queries from GH titles + proactive targets.
+    # This surfaces Reverb listings that the static query list would miss
+    # (e.g. "suhr modern plus" when only "suhr modern electric" is in the static list).
+    dynamic_queries = []
+    for gh_item in gh_items:
+        q = build_reverb_sold_query(gh_item["title"])
+        if q:
+            dynamic_queries.append(q)
+    for target in proactive_targets:
+        q = build_reverb_sold_query(target["title"])
+        if q:
+            dynamic_queries.append(q)
+    # Dedupe and limit to avoid excessive API calls (1 page each for dynamic queries)
+    dynamic_queries = list(dict.fromkeys(dynamic_queries))  # dedupe preserving order
+    print(f"\nReverb: {len(dynamic_queries)} dynamic queries from GH + proactive targets")
+
     print("\nScraping Reverb...")
-    reverb_items = scrape_reverb()
+    reverb_items = scrape_reverb(extra_queries=dynamic_queries)
 
     us_items = (
         daves_items + wildwood_items + graysons_items + twin_town_items +
@@ -495,11 +518,6 @@ def main() -> None:
     print(f"\nTotal US items: {len(us_items)}")
     for src, cnt in us_counts.items():
         print(f"  {fmt_source(src)}: {cnt}")
-
-    # ── Scrape Guitar's Home (reactive mode) ──────────────────────────────────
-    print("\nScraping Guitar's Home...")
-    gh_items = scrape_guitarshome()
-    print(f"Guitar's Home: {len(gh_items)} guitarras")
 
     # ── Price history DB — record all US prices, detect drops ────────────────
     ph = PriceHistory()
@@ -717,20 +735,51 @@ def main() -> None:
             )
 
     # ── Telegram: BUY NOW urgent alerts (separate message, sent first) ───────
+    # Dedup: only send alerts for deals not previously alerted at same verdict level.
+    # A deal upgrading from REVIEW → BUY NOW gets a new alert.
+    ph.cleanup_old_alerts(days=30)
+    sent_count = 0
     if buy_now:
-        lines = ["*** COMPRA AHORA ***\n"]
         for item in buy_now[:3]:
+            us_url = item["us_url"]
+            if ph.was_alerted(us_url, "BUY NOW"):
+                continue
             ds = item.get("deal_score", {})
-            lines.append(
+            cond = item.get("us_condition", "")
+            cond_str = f" [{cond}]" if cond else ""
+            sale_str = ""
+            if item.get("on_sale") and item.get("discount_pct", 0) > 0:
+                sale_str = f"\nOFERTA: -{item['discount_pct']:.0f}% (era ${item.get('original_price_usd', 0):,.0f})"
+            offer_str = ""
+            if item.get("days_on_market", 0) >= 45:
+                suggested_offer = int(item["us_price_usd"] * 0.90)
+                offer_str = f"\nOferta sugerida: ${suggested_offer:,} USD (90%)"
+            gh_url = item.get("gh_url", "")
+            gh_link = f"\nGH: {gh_url}" if gh_url else ""
+            caption = (
+                f"*** COMPRA AHORA ***\n\n"
                 f"{item['gh_title']}\n"
-                f"  Score: {ds.get('total',0)}/100 | Margen: {item['margin']*100:.1f}%\n"
-                f"  Compra: {fmt_source(item['us_source'])} ${item['us_price_usd']:,.0f} USD\n"
-                f"  Benchmark: {benchmark_label(item)}\n"
-                f"  {' | '.join(ds.get('flags',[]))}\n"
-                f"  URL: {item['us_url']}\n"
+                f"Score: {ds.get('total',0)}/100 | Margen: {item['margin']*100:.1f}%{cond_str}\n"
+                f"Compra: {fmt_source(item['us_source'])} ${item['us_price_usd']:,.0f} USD\n"
+                f"Venta MX: ${item.get('suggested_sell_mxn', 0):,} MXN\n"
+                f"Benchmark: {benchmark_label(item)}"
+                f"{sale_str}{offer_str}\n"
+                f"{' | '.join(ds.get('flags',[]))}\n"
+                f"URL: {item['us_url']}{gh_link}"
             )
-        send_telegram_message(bot_token=bot_token, chat_id=chat_id, text="\n".join(lines))
-        print(f"ALERTA BUY NOW enviada: {len(buy_now)} deals")
+            img = item.get("image_url", "")
+            if img:
+                send_telegram_photo(bot_token=bot_token, chat_id=chat_id,
+                                    photo_url=img, caption=caption)
+            else:
+                send_telegram_message(bot_token=bot_token, chat_id=chat_id,
+                                      text=caption)
+            ph.record_alert(us_url, ds.get("total", 0), "BUY NOW")
+            sent_count += 1
+        if sent_count:
+            print(f"ALERTA BUY NOW enviada: {sent_count} deals nuevos")
+        elif buy_now:
+            print(f"BUY NOW: {len(buy_now)} deals (ya alertados previamente)")
 
     # ── Telegram: price drop alerts ───────────────────────────────────────────
     if price_drops:

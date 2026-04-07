@@ -28,6 +28,38 @@ def send_telegram_message(bot_token: str, chat_id: str, text: str) -> dict:
     return last_response
 
 
+TELEGRAM_CAPTION_MAX = 1024
+
+
+def send_telegram_photo(bot_token: str, chat_id: str,
+                        photo_url: str, caption: str = "") -> dict:
+    """
+    Send a photo to Telegram with an optional caption.
+    Caption is truncated to 1024 chars (Telegram limit for photo captions).
+    Falls back to sendMessage if photo fails.
+    """
+    url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+
+    if len(caption) > TELEGRAM_CAPTION_MAX:
+        caption = caption[:TELEGRAM_CAPTION_MAX - 3] + "..."
+
+    try:
+        response = requests.post(
+            url,
+            json={
+                "chat_id": chat_id,
+                "photo": photo_url,
+                "caption": caption,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception:
+        # Fallback to text if photo fails (expired URL, etc.)
+        return send_telegram_message(bot_token, chat_id, caption)
+
+
 def _split_message(text: str, max_len: int = TELEGRAM_MAX_CHARS) -> list:
     """
     Split a message into chunks of at most max_len characters,

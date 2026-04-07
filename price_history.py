@@ -66,6 +66,17 @@ class PriceHistory:
                 drop_pct    REAL NOT NULL,
                 alerted_at  TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS sent_alerts (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                us_url      TEXT NOT NULL,
+                score       INTEGER NOT NULL,
+                verdict     TEXT NOT NULL,
+                sent_at     TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sent_url
+                ON sent_alerts(us_url);
         """)
         self.conn.commit()
 
@@ -228,6 +239,34 @@ class PriceHistory:
             (cutoff,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── Alert dedup ────────────────────────────────────────────────────────────
+
+    def was_alerted(self, us_url: str, verdict: str) -> bool:
+        """Check if this URL was already alerted with this verdict (BUY NOW / REVIEW)."""
+        row = self.conn.execute(
+            "SELECT id FROM sent_alerts WHERE us_url = ? AND verdict = ? LIMIT 1",
+            (us_url, verdict),
+        ).fetchone()
+        return row is not None
+
+    def record_alert(self, us_url: str, score: int, verdict: str) -> None:
+        """Record that an alert was sent for this URL."""
+        now = datetime.utcnow().isoformat()
+        self.conn.execute(
+            "INSERT INTO sent_alerts (us_url, score, verdict, sent_at) VALUES (?,?,?,?)",
+            (us_url, score, verdict, now),
+        )
+        self.conn.commit()
+
+    def cleanup_old_alerts(self, days: int = 30) -> int:
+        """Remove sent_alerts older than N days. Returns count deleted."""
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        cursor = self.conn.execute(
+            "DELETE FROM sent_alerts WHERE sent_at < ?", (cutoff,)
+        )
+        self.conn.commit()
+        return cursor.rowcount
 
     def summary(self) -> dict:
         """Return database stats."""

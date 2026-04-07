@@ -137,6 +137,30 @@ MODEL_KEYWORDS = {
     "jazz bass",
     "j bass",
     "jbass",
+    "custom 24",        # PRS Custom 24 — set neck, mahogany body, ≠ CE 24 (bolt-on)
+    "ce 24",            # PRS CE 24 — bolt-on neck, different construction from Custom 24
+    "custom 22",        # PRS Custom 22 — 22-fret variant of Custom 24
+    "ce 22",            # PRS CE 22 — bolt-on 22-fret variant
+    "silver sky",       # PRS Silver Sky — John Mayer signature, Strat-style, ≠ Custom 24
+    "mccarty 594",      # PRS McCarty 594 — vintage-voiced, different from Custom 24/CE 24
+    "mccarty",          # PRS McCarty (non-594) — different from Custom 24/CE 24
+    "santana retro",    # PRS Santana Retro — artist model, ≠ Custom 24
+    "modern eagle",     # PRS Modern Eagle — premium tier, ≠ Custom 24
+    "dgt",              # PRS DGT — David Grissom Trem, ≠ Custom 24
+    "hollowbody",       # PRS Hollowbody — completely different from solid body models
+    "singlecut",        # PRS Singlecut — single-cutaway, ≠ Custom 24 double-cutaway
+    # Taylor acoustic models — each is a distinct body shape and price tier
+    "grand auditorium",  # Taylor Grand Auditorium (e.g. 814ce)
+    "grand symphony",    # Taylor Grand Symphony (e.g. 716ce) — larger body
+    "grand concert",     # Taylor Grand Concert (e.g. 512ce) — smaller body
+    "grand pacific",     # Taylor Grand Pacific (e.g. 717) — round-shoulder dreadnought
+    "grand theater",     # Taylor Grand Theater (e.g. GT 811) — compact body
+    "t3",               # Taylor T3 — semi-hollow electric, ≠ any acoustic Taylor
+    "t5",               # Taylor T5 — hollow electric, ≠ T3 or acoustics
+    # Suhr models
+    "modern plus",      # Suhr Modern Plus — distinct from Modern, Classic S, Classic T
+    "modern",           # Suhr Modern — base model, ≠ Modern Plus (different electronics)
+    "alt",              # Suhr Alt (T, S) — alternative series
 }
 
 SUBMODEL_KEYWORDS = {
@@ -231,6 +255,34 @@ FINISH_WORDS = {
     "wine",
     "mocha",
     "amethyst",
+    "burgundy",
+    "honey",
+    "amber",
+    "tobacco",
+    "ocean",
+    "seafoam",
+    "surf",
+    "olympic",
+    "fiesta",
+    "candy",
+    "coral",
+    "shell",
+    "pink",
+    "purple",
+    "violet",
+    "orange",
+    "turquoise",
+    "teal",
+    "ivory",
+    "cream",
+    "vintage",
+    "antique",
+    "iced",
+    "faded",
+    "trans",
+    "transparent",
+    "satin",
+    "mist",
 }
 
 # Year ranges that indicate vintage vs modern guitars.
@@ -249,20 +301,37 @@ TIER_SUBMODELS = {"standard", "studio", "classic", "junior", "deluxe", "special"
 #   NOS / Closet Classic → pristine, no distressing, higher collector value
 #   Relic / Heavy Relic  → artificially aged, different aesthetic, different price
 # A NOS and a Relic of the same model can differ by $1,000-2,000 USD.
-_RELIC_KEYWORDS = {"heavy relic", "journeyman relic", "light relic", "relic"}
-_NOS_KEYWORDS   = {"nos", "closet classic"}
+# Relic aging levels — each level is a distinct price tier ($500-1,500 between levels).
+# Heavy Relic ($$$) > Journeyman Relic ($$) > Light Relic ($) > Relic (generic)
+# Sorted longest-first to avoid "relic" matching before "heavy relic".
+_RELIC_TIERS: Dict[str, int] = {
+    "heavy relic":      3,
+    "journeyman relic": 2,
+    "light relic":      1,
+    "relic":            0,   # generic "relic" — unspecified level
+}
+_NOS_KEYWORDS = {"nos", "closet classic"}
 
 
 def _classify_finish_type(title: str) -> str:
     """Returns 'relic', 'nos', or '' (unknown)."""
     text = normalize_title(title)
-    for kw in sorted(_RELIC_KEYWORDS, key=len, reverse=True):   # longest first
+    for kw in sorted(_RELIC_TIERS.keys(), key=len, reverse=True):
         if kw in text:
             return "relic"
     for kw in _NOS_KEYWORDS:
         if kw in text:
             return "nos"
     return ""
+
+
+def _classify_relic_tier(title: str) -> Optional[int]:
+    """Returns relic tier (0-3) or None if not a relic."""
+    text = normalize_title(title)
+    for kw in sorted(_RELIC_TIERS.keys(), key=len, reverse=True):
+        if kw in text:
+            return _RELIC_TIERS[kw]
+    return None
 
 
 # Pre-normalize ARTIST_SIGNATURES so the lookup works correctly after normalize_title().
@@ -405,12 +474,84 @@ def fuzzy_score(title_a: str, title_b: str) -> int:
     return int(fuzz.token_set_ratio(a, b))
 
 
-def is_hard_match(gh_title: str, us_title: str) -> bool:
+def _extract_spec_terms(description: str) -> str:
+    """
+    Extract price-relevant spec terms from a product description for fuzzy matching.
+
+    Descriptions are noisy (seller stories, shipping info, return policies).
+    We extract only terms that help identify the guitar: brand, model, year,
+    finish, wood, pickups, and known keywords from our matching vocabulary.
+
+    Returns a short normalized string of spec-relevant tokens.
+    """
+    if not description:
+        return ""
+    text = normalize_title(description)
+
+    spec_tokens: List[str] = []
+
+    # Extract brand if present
+    brand = extract_brand(description)
+    if brand:
+        spec_tokens.append(brand)
+
+    # Extract model family if present
+    model = extract_model_family(description)
+    if model:
+        spec_tokens.append(model)
+
+    # Extract submodels (custom shop, masterbuilt, wood library, etc.)
+    for sub in extract_submodels(description):
+        spec_tokens.append(sub)
+
+    # Extract finish tokens
+    for f in extract_finish_tokens(description):
+        spec_tokens.append(f)
+
+    # Extract years
+    year = extract_year(description)
+    if year:
+        spec_tokens.append(str(year))
+
+    # Known spec keywords that affect identity/price
+    _spec_kw = {
+        "relic", "heavy relic", "light relic", "nos", "closet classic",
+        "roasted", "flame", "quilt", "10 top", "figured",
+        "hss", "hsh", "sss", "hhh", "p90", "p-90",
+        "tremolo", "bigsby", "floyd", "hardtail",
+        "satin", "gloss", "nitro", "poly",
+    }
+    for kw in _spec_kw:
+        if kw in text:
+            spec_tokens.append(kw)
+
+    return " ".join(dict.fromkeys(spec_tokens))  # dedupe preserving order
+
+
+def is_hard_match(gh_title: str, us_title: str,
+                   gh_desc: str = "", us_desc: str = "") -> bool:
+    # Build "effective" text for each side: title + description.
+    # Hard-match checks use this so that specs hidden in descriptions are caught.
+    # Title-only checks (finish type, artist) still use just the title where noted.
+    gh_effective = (gh_title + " " + gh_desc).strip() if gh_desc else gh_title
+    us_effective = (us_title + " " + us_desc).strip() if us_desc else us_title
+
+    # One of a Kind / signed / numbered check: these guitars have non-replicable pricing.
+    # "1-of-1", "one of a kind", "signed by", "23/100" → skip on EITHER side.
+    _unique_re = re.compile(
+        r'one.of.a.kind|1\s*[-/]\s*of\s*[-/]?\s*1'
+        r'|\bsigned\s+by\b|\bautograph'
+        r'|\b\d+\s*/\s*\d+\b',
+        re.I
+    )
+    if _unique_re.search(us_effective) or _unique_re.search(gh_effective):
+        return False
+
     # Doubleneck check: EDS-1275 and other doublenecks are a completely different category.
     # Prevents "EDS-1275 Doubleneck" from matching any single-neck guitar like ES-335.
     _doubleneck_kw = {"doubleneck", "double neck", "double-neck", "eds-1275", "eds1275"}
-    gh_dn = any(kw in normalize_title(gh_title) for kw in _doubleneck_kw)
-    us_dn = any(kw in normalize_title(us_title) for kw in _doubleneck_kw)
+    gh_dn = any(kw in normalize_title(gh_effective) for kw in _doubleneck_kw)
+    us_dn = any(kw in normalize_title(us_effective) for kw in _doubleneck_kw)
     if gh_dn != us_dn:
         return False
 
@@ -419,9 +560,58 @@ def is_hard_match(gh_title: str, us_title: str) -> bool:
     # Price difference can be $300-600 USD on the same base model.
     # Only reject if one declares Floyd and the other doesn't.
     _floyd_kw = {"floyd rose", "floyd", "fr tremolo", "double locking"}
-    gh_floyd = any(kw in normalize_title(gh_title) for kw in _floyd_kw)
-    us_floyd = any(kw in normalize_title(us_title) for kw in _floyd_kw)
+    gh_floyd = any(kw in normalize_title(gh_effective) for kw in _floyd_kw)
+    us_floyd = any(kw in normalize_title(us_effective) for kw in _floyd_kw)
     if gh_floyd != us_floyd:
+        return False
+
+    # Left-handed check: lefty guitars are a completely different market.
+    # Inventory is smaller, resale is harder, prices differ. Never cross-match.
+    _lefty_kw = {"left handed", "left-handed", "lefty", "zurdo", "zurda", "lh ", " lh"}
+    gh_lefty = any(kw in normalize_title(gh_effective) for kw in _lefty_kw)
+    us_lefty = any(kw in normalize_title(us_effective) for kw in _lefty_kw)
+    if gh_lefty != us_lefty:
+        return False
+
+    # String count check: 7-string, 8-string, 12-string, baritone are different instruments.
+    # A 7-string Les Paul is NOT the same market as a 6-string Les Paul.
+    _string_re = re.compile(r'\b(7|8|9|12)[\s-]?string|\bbaritone\b|\bbari\b', re.I)
+    gh_special_strings = bool(_string_re.search(gh_effective))
+    us_special_strings = bool(_string_re.search(us_effective))
+    if gh_special_strings != us_special_strings:
+        return False
+    # If both have special strings, ensure same count (7-string ≠ 8-string)
+    if gh_special_strings and us_special_strings:
+        gh_counts = set(re.findall(r'\b(\d+)[\s-]?string', gh_effective, re.I))
+        us_counts = set(re.findall(r'\b(\d+)[\s-]?string', us_effective, re.I))
+        if gh_counts and us_counts and gh_counts.isdisjoint(us_counts):
+            return False
+
+    # Pickup configuration check: HSS ≠ SSS ≠ HH ≠ P90.
+    # Different pickup layouts produce fundamentally different tones and attract
+    # different buyers. A Strat with HSS pickups is $100-300 different from SSS.
+    _pickup_configs = {
+        "hss", "ssh", "hsh", "hhh", "hh", "ss", "sss",
+        "p90", "p-90", "p 90",
+    }
+    gh_norm = normalize_title(gh_effective)
+    us_norm = normalize_title(us_effective)
+    gh_pickups = {p for p in _pickup_configs if re.search(r'\b' + re.escape(p) + r'\b', gh_norm)}
+    us_pickups = {p for p in _pickup_configs if re.search(r'\b' + re.escape(p) + r'\b', us_norm)}
+    # Normalize aliases: "ssh" = "hss" (same config, different naming)
+    _pickup_aliases = {"ssh": "hss"}
+    gh_pickups = {_pickup_aliases.get(p, p) for p in gh_pickups}
+    us_pickups = {_pickup_aliases.get(p, p) for p in us_pickups}
+    # P-90 variants
+    gh_p90 = bool(gh_pickups & {"p90", "p-90", "p 90"})
+    us_p90 = bool(us_pickups & {"p90", "p-90", "p 90"})
+    gh_pickups -= {"p-90", "p 90"}  # normalize to just "p90"
+    us_pickups -= {"p-90", "p 90"}
+    if gh_p90:
+        gh_pickups.add("p90")
+    if us_p90:
+        us_pickups.add("p90")
+    if gh_pickups and us_pickups and gh_pickups.isdisjoint(us_pickups):
         return False
 
     # Quilt Top / figured top check: a "10 Top" or "Quilt Top" PRS carries a significant
@@ -430,108 +620,134 @@ def is_hard_match(gh_title: str, us_title: str) -> bool:
     # Note: only applies when GH (the benchmark) has the premium top — we don't reject when
     # only the US side declares it (buying premium, benchmarking standard = conservative).
     _quilt_kw = {"quilt top", "quilted", "10 top", "10top"}
-    gh_quilt = any(kw in normalize_title(gh_title) for kw in _quilt_kw)
-    us_quilt = any(kw in normalize_title(us_title) for kw in _quilt_kw)
+    gh_quilt = any(kw in normalize_title(gh_effective) for kw in _quilt_kw)
+    us_quilt = any(kw in normalize_title(us_effective) for kw in _quilt_kw)
     if gh_quilt and not us_quilt:
         return False
 
     # Florentine check: Les Paul Custom Florentine Plus has a carved maple top and specific
     # appointments that make it a distinct model from a standard Les Paul Custom VOS.
     # If GH benchmark declares "Florentine" and US listing doesn't → different guitar.
-    gh_florentine = "florentine" in normalize_title(gh_title)
-    us_florentine = "florentine" in normalize_title(us_title)
+    gh_florentine = "florentine" in normalize_title(gh_effective)
+    us_florentine = "florentine" in normalize_title(us_effective)
     if gh_florentine and not us_florentine:
         return False
 
     # Goldtop check: Goldtop is a specific finish (gold metallic) on Les Paul and PRS.
     # Commands a different resale price than burst or other finishes.
     # If GH benchmark is a Goldtop and US listing isn't → finish mismatch, reject.
-    gh_goldtop = "goldtop" in normalize_title(gh_title) or "gold top" in normalize_title(gh_title)
-    us_goldtop = "goldtop" in normalize_title(us_title) or "gold top" in normalize_title(us_title)
+    gh_goldtop = "goldtop" in normalize_title(gh_effective) or "gold top" in normalize_title(gh_effective)
+    us_goldtop = "goldtop" in normalize_title(us_effective) or "gold top" in normalize_title(us_effective)
     if gh_goldtop and not us_goldtop:
         return False
 
     # Guitar type check: acoustic vs electric — never match across types.
     # Extra safety: if GH benchmark is definitively acoustic, US must also be acoustic.
     # An unknown US type (model not in our sets) is not safe to match against a known acoustic.
-    gh_type = detect_guitar_type(gh_title)
-    us_type = detect_guitar_type(us_title)
+    gh_type = detect_guitar_type(gh_effective)
+    us_type = detect_guitar_type(us_effective)
     if gh_type and us_type and gh_type != us_type:
         return False
     if gh_type == "acoustic" and us_type != "acoustic":
         return False
 
-    # Brand must match if both titles declare one
-    gh_brand = extract_brand(gh_title)
-    us_brand = extract_brand(us_title)
+    # Brand must match if both sides declare one.
+    # Check effective text (title + description) so brand in description is caught.
+    gh_brand = extract_brand(gh_effective)
+    us_brand = extract_brand(us_effective)
     if gh_brand and us_brand and gh_brand != us_brand:
         return False
 
-    # Model family must match if both titles declare one
-    gh_family = extract_model_family(gh_title)
-    us_family = extract_model_family(us_title)
+    # Model family must match if both sides declare one.
+    # Check effective text so model names in descriptions are caught (e.g. Reverb title
+    # says "Suhr Modern Plus" but description says "CE 24" → mismatch detected).
+    gh_family = extract_model_family(gh_effective)
+    us_family = extract_model_family(us_effective)
     if gh_family and us_family and gh_family != us_family:
         return False
 
     # Aging tier check: Murphy Lab tiers carry $2,000-4,000 price gaps between levels.
-    # Only reject if BOTH titles declare an aging tier and they differ by more than 1 step.
-    # (If only one side declares it, we allow the match — the other side may not label it.)
-    gh_aging = detect_aging_tier(gh_title)
-    us_aging = detect_aging_tier(us_title)
+    # Only reject if BOTH sides declare an aging tier and they differ by more than 1 step.
+    gh_aging = detect_aging_tier(gh_effective)
+    us_aging = detect_aging_tier(us_effective)
     if gh_aging is not None and us_aging is not None:
         if abs(gh_aging - us_aging) > 1:
             return False
 
     # Brazilian rosewood check: adds $2,000-5,000+ vs Indian rosewood.
-    # If one title explicitly declares Brazilian and the other doesn't, it's a different guitar.
-    gh_brazilian = detect_brazilian(gh_title)
-    us_brazilian = detect_brazilian(us_title)
+    # If one side explicitly declares Brazilian and the other doesn't, it's a different guitar.
+    gh_brazilian = detect_brazilian(gh_effective)
+    us_brazilian = detect_brazilian(us_effective)
     if gh_brazilian != us_brazilian:
         return False
 
-    # Submodel checks — compute once, used for both premium tier and model tier.
-    gh_sub = extract_submodels(gh_title)
-    us_sub = extract_submodels(us_title)
+    # Submodel checks — effective text for general submodels.
+    gh_sub = extract_submodels(gh_effective)
+    us_sub = extract_submodels(us_effective)
 
-    # Premium tier check: one premium vs one non-premium is a mismatch
+    # Premium tier check: one premium vs one non-premium is a mismatch.
+    # IMPORTANT: Use TITLE-ONLY for premium detection — descriptions often mention
+    # "Custom Shop" in comparative context ("without going full Custom Shop") which
+    # does NOT mean the guitar IS Custom Shop.
+    gh_sub_title = extract_submodels(gh_title)
+    us_sub_title = extract_submodels(us_title)
     premium_markers = {
         "custom shop", "murphy lab", "masterbuilt", "vos",
         "wood library", "private stock", "made 2 measure",
         "dealer exclusive", "wildwood spec",
     }
-    gh_premium = gh_sub & premium_markers
-    us_premium = us_sub & premium_markers
+    gh_premium = gh_sub_title & premium_markers
+    us_premium = us_sub_title & premium_markers
     if bool(gh_premium) != bool(us_premium):
         return False
 
+    # Masterbuilt vs regular Custom Shop: Masterbuilt guitars are hand-built by a single
+    # master builder and command 2-3x the price of a regular Custom Shop ($6K-10K+ vs $3K-5K).
+    # If one side declares Masterbuilt and the other doesn't, it's a different price tier.
+    gh_masterbuilt = "masterbuilt" in gh_sub_title
+    us_masterbuilt = "masterbuilt" in us_sub_title
+    if gh_masterbuilt != us_masterbuilt:
+        return False
+
     # Model tier check: "Les Paul Standard" ≠ "Les Paul Studio" — clearly different guitars.
-    # If both titles declare a differentiating tier submodel and they don't share one → reject.
+    # If both sides declare a differentiating tier submodel and they don't share one → reject.
     gh_tier = gh_sub & TIER_SUBMODELS
     us_tier = us_sub & TIER_SUBMODELS
     if gh_tier and us_tier and gh_tier.isdisjoint(us_tier):
         return False
 
-    # Finish check: if both declare finish tokens that share nothing, it's a different colorway
-    gh_finish = extract_finish_tokens(gh_title)
-    us_finish = extract_finish_tokens(us_title)
+    # Finish check: if both declare finish tokens that share nothing, it's a different colorway.
+    # Use effective text so finish mentioned in description is caught.
+    gh_finish = extract_finish_tokens(gh_effective)
+    us_finish = extract_finish_tokens(us_effective)
     if gh_finish and us_finish and gh_finish.isdisjoint(us_finish):
         return False
 
     # Finishing type check: Relic ≠ NOS — different aesthetic, different price category.
     # A Relic Custom Shop and an NOS Custom Shop of the same model can differ by $1,000-2,000 USD.
-    gh_finish_type = _classify_finish_type(gh_title)
-    us_finish_type = _classify_finish_type(us_title)
+    gh_finish_type = _classify_finish_type(gh_effective)
+    us_finish_type = _classify_finish_type(us_effective)
     if gh_finish_type and us_finish_type and gh_finish_type != us_finish_type:
+        return False
+
+    # Relic sub-level check: Heavy Relic ($$$) vs Journeyman Relic ($$) vs Light Relic ($).
+    # These are distinct aging levels with $500-1,500 price gaps between them.
+    # If both are relics but different tiers, reject.
+    gh_relic_tier = _classify_relic_tier(gh_effective)
+    us_relic_tier = _classify_relic_tier(us_effective)
+    if (gh_relic_tier is not None and us_relic_tier is not None
+            and gh_relic_tier != us_relic_tier
+            and gh_relic_tier != 0 and us_relic_tier != 0):
+        # Only reject when BOTH specify a concrete tier (not generic "relic" = tier 0).
+        # "Heavy Relic" vs "Journeyman Relic" → reject.
+        # "Relic" vs "Heavy Relic" → allow (generic could be any level).
         return False
 
     # Artist/signature check — bidirectional.
     # If EITHER side has a named artist model, the other side must mention the same artist.
-    # Prevents: "B.B. King ES-335" ↔ "Alvin Lee ES-335" (different artists)
-    #           "Jimmy Page Telecaster" ↔ "1955 Masterbuilt Relic" (signature vs non-signature)
-    #           "Santana Retro" ↔ "Custom 24" (Santana is an artist name on PRS)
-    # NOTE: normalize artist names the same way as titles — "b.b. king" → "b b king".
-    gh_text = normalize_title(gh_title)
-    us_text = normalize_title(us_title)
+    # Use effective text so artist names in descriptions are caught.
+    gh_text = normalize_title(gh_effective)
+    us_text = normalize_title(us_effective)
     gh_artists = {a for a in _NORM_ARTIST_SIGNATURES if a in gh_text}
     us_artists = {a for a in _NORM_ARTIST_SIGNATURES if a in us_text}
     if gh_artists and not us_artists:
@@ -586,6 +802,55 @@ def is_hard_match(gh_title: str, us_title: str) -> bool:
     us_fender_upgrade = bool(_fender_upgrade_re.search(us_title))
     if gh_fender_upgrade != us_fender_upgrade:
         return False
+
+    # Center Block check: Gretsch (and others) make "Center Block" semi-hollow variants
+    # that are fundamentally different from their full-hollow counterparts.
+    # G6636T-RF (Center Block) ≠ G6136RF (full hollow Falcon) — different construction,
+    # weight, feedback characteristics, and price ($500-1500 difference).
+    _center_block_kw = {"center block", "center-block", "centerblock"}
+    gh_cb = any(kw in normalize_title(gh_effective) for kw in _center_block_kw)
+    us_cb = any(kw in normalize_title(us_effective) for kw in _center_block_kw)
+    if gh_cb != us_cb:
+        return False
+
+    # Bigsby vs non-Bigsby (V-Stoptail) check: different tailpiece = different guitar.
+    # A Bigsby adds vibrato but changes string tension/feel. On Gretsch Falcons,
+    # V-Stoptail versions (no Bigsby) command different prices.
+    _bigsby_kw = {"bigsby", "b7", "b6", "b3"}
+    _stoptail_kw = {"v-stop", "v stop", "stoptail", "stop tail"}
+    gh_bigsby = any(kw in normalize_title(gh_effective) for kw in _bigsby_kw)
+    us_bigsby = any(kw in normalize_title(us_effective) for kw in _bigsby_kw)
+    gh_stop = any(kw in normalize_title(gh_effective) for kw in _stoptail_kw)
+    us_stop = any(kw in normalize_title(us_effective) for kw in _stoptail_kw)
+    # Reject if one declares Bigsby and the other declares stoptail
+    if (gh_bigsby and us_stop) or (us_bigsby and gh_stop):
+        return False
+
+    # Les Paul Custom decade-variant check: "70's Custom" / "70s Custom" is a distinct
+    # reissue with pancake body, volute, and different specs from a regular LP Custom.
+    # Same applies to "54 Custom", "57 Custom", etc. — but those are caught by reissue year.
+    # The 70's specifically is sold as "Les Paul Custom 70's" without a specific reissue year.
+    _70s_re = re.compile(r"\b70'?s\b", re.I)
+    gh_70s = bool(_70s_re.search(gh_effective))
+    us_70s = bool(_70s_re.search(us_effective))
+    if gh_family == "les paul custom" or us_family == "les paul custom":
+        if gh_70s != us_70s:
+            return False
+
+    # Taylor cutaway/electronics check: Taylor "XXXce" models have a cutaway body and
+    # built-in electronics (pickup + preamp). The non-ce version (e.g. 716 vs 716ce)
+    # is a different guitar with different playability and $200-500 price difference.
+    # Also catches "e" suffix (electronics only, no cutaway) vs bare model.
+    _taylor_ce_re = re.compile(r'\b\d{3}ce\b', re.I)
+    _taylor_no_ce_re = re.compile(r'\b\d{3}\b(?!ce)', re.I)
+    gh_has_ce = bool(_taylor_ce_re.search(gh_effective))
+    us_has_ce = bool(_taylor_ce_re.search(us_effective))
+    # Only check if at least one side is a Taylor
+    if (extract_brand(gh_effective) == "taylor" or extract_brand(us_effective) == "taylor"):
+        if gh_has_ce and not us_has_ce:
+            return False
+        if us_has_ce and not gh_has_ce:
+            return False
 
     # Anniversary edition check: "70th Anniversary", "40th Anniversary", etc. are
     # specific limited editions with different specs and price points.
@@ -687,10 +952,53 @@ def find_best_match(gh_item: Dict, us_items: List[Dict]) -> Tuple[Optional[Dict]
     gh_year = extract_year(gh_item["title"])
 
     for us_item in us_items:
-        if not is_hard_match(gh_item["title"], us_item["title"]):
+        if not is_hard_match(gh_item["title"], us_item["title"],
+                             gh_desc=gh_item.get("description", ""),
+                             us_desc=us_item.get("description", "")):
             continue
 
-        score = fuzzy_score(gh_item["title"], us_item["title"])
+        # Score from titles only
+        title_score = fuzzy_score(gh_item["title"], us_item["title"])
+
+        # Score from title + description: when US title is vague but description has
+        # the real specs, this recovers matches that title-only scoring would miss.
+        us_desc = us_item.get("description", "")
+        desc_spec_terms = _extract_spec_terms(us_desc)
+        if desc_spec_terms:
+            # Build enriched US text: title + extracted spec terms from description
+            enriched_us = us_item["title"] + " " + desc_spec_terms
+            desc_score = fuzzy_score(gh_item["title"], enriched_us)
+        else:
+            desc_score = title_score
+
+        # Use the better of the two scores
+        score = max(title_score, desc_score)
+
+        # Vague-title penalty: if the US title has far fewer meaningful tokens than GH
+        # AND the description doesn't compensate, penalize.
+        gh_tokens = tokenize(gh_item["title"])
+        us_tokens = tokenize(us_item["title"])
+        if len(us_tokens) > 0 and len(gh_tokens) > 0:
+            token_ratio = len(us_tokens) / len(gh_tokens)
+            if token_ratio < 0.50:
+                # Check if description contains GH-title tokens that are missing from US title.
+                # If the description fills in the gaps, the match is more trustworthy.
+                gh_set = set(gh_tokens)
+                us_set = set(us_tokens)
+                missing_from_title = gh_set - us_set
+                if missing_from_title and desc_spec_terms:
+                    desc_tokens = set(normalize_title(desc_spec_terms).split())
+                    recovered = missing_from_title & desc_tokens
+                    recovery_ratio = len(recovered) / len(missing_from_title) if missing_from_title else 0
+                else:
+                    recovery_ratio = 0.0
+
+                if recovery_ratio >= 0.50:
+                    # Description recovered ≥50% of missing spec tokens — mild penalty
+                    score = max(0, score - 8)
+                else:
+                    # Description didn't help — title is genuinely vague
+                    score = max(0, score - 25)
 
         # Year proximity bonus/penalty.
         # Prefers exact-year matches when multiple candidates pass the hard filter.

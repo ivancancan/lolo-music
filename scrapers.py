@@ -24,9 +24,21 @@ MAX_RETRIES            = 2
 MIN_PRICE_USD          = 400.0   # Reject accessories, parts, straps, etc.
 
 ACCESSORY_KEYWORDS = {
-    "case", "gig bag", "strap", "pad", "back pad", "string", "strings",
-    "pickup", "tuner", "pedal", "cable", "stand", "capo", "slide",
-    "tremolo arm", "whammy bar", "knob", "nut", "saddle",
+    "gig bag", "tremolo arm", "whammy bar",
+    # Non-guitar gear that leaks through mixed collections (CME price-drops, etc.)
+    "amplifier", "amp head", "amp combo", "combo amp", "guitar combo",
+    "guitar amp", "bass amp", "bass head", "bass combo",
+    "speaker cabinet", "speaker cab",
+    "preamp", "power amp", "attenuator",
+    "pedalboard", "power supply",
+    "lap steel", "steel guitar", "pedal steel",
+    "banjo", "mandolin", "ukulele", "violin", "cello",
+    "drum", "cymbal", "snare", "hi-hat",
+    "microphone", "audio interface", "mixer",
+    # Speaker cab sizes (catches "1x12 Combo", "4x12 Cabinet", etc.)
+    "1x8", "1x10", "1x12", "2x10", "2x12", "4x10", "4x12",
+    # Wattage in title = amp, not guitar
+    "-watt",
 }
 
 
@@ -105,9 +117,16 @@ def extract_usd_price(text: str) -> Optional[float]:
         return None
 
 
+_AMP_RE = re.compile(r'\b\d+[\s-]?watt\b|\b\d+x\d+["\s]', re.I)
+
+
 def is_accessory_title(title: str) -> bool:
     low = title.lower()
-    return any(kw in low for kw in ACCESSORY_KEYWORDS)
+    if any(kw in low for kw in ACCESSORY_KEYWORDS):
+        return True
+    if _AMP_RE.search(low):
+        return True
+    return False
 
 
 # Condition grades in descending order (Mint → Poor)
@@ -290,6 +309,10 @@ def scrape_shopify_store(
                 # Parse price-relevant spec attributes (aging, tonewoods, COA, mods)
                 specs = parse_guitar_specs(title, description)
 
+                # First product image (for BUY NOW Telegram alerts)
+                images = product.get("images") or []
+                image_url = images[0].get("src", "") if images else ""
+
                 product_url = f"{base_url}/products/{handle}"
 
                 # First available variant with a valid price
@@ -317,6 +340,8 @@ def scrape_shopify_store(
                     all_items.append({
                         "source":              source_name,
                         "title":               title,
+                        "description":         description,
+                        "image_url":           image_url,
                         "price_usd":           price,
                         "original_price_usd":  compare_at,
                         "on_sale":             on_sale,
@@ -390,6 +415,32 @@ def parse_guitarshome_listing_page(html: str, category: str, page: int) -> List[
     return items
 
 
+def fetch_gh_product_description(url: str) -> str:
+    """
+    Fetch the individual GH product page and extract the specs description.
+    GH specs are in plain text paragraphs with "Label: Value" format inside
+    the WooCommerce product description area.
+    Returns the full description text, or "" on failure.
+    """
+    response = safe_get(url)
+    if not response:
+        return ""
+    try:
+        soup = BeautifulSoup(response.text, "lxml")
+        # WooCommerce product description — try multiple selectors
+        desc_el = (
+            soup.select_one(".woocommerce-product-details__short-description")
+            or soup.select_one(".product_meta + div")
+            or soup.select_one(".entry-content")
+            or soup.select_one(".description")
+        )
+        if desc_el:
+            return desc_el.get_text(" ", strip=True)
+    except Exception:
+        pass
+    return ""
+
+
 def scrape_guitarshome(max_pages_per_category: int = 100) -> List[Dict]:
     all_items: List[Dict] = []
     seen_urls: Set[str]   = set()
@@ -425,7 +476,18 @@ def scrape_guitarshome(max_pages_per_category: int = 100) -> List[Dict]:
 
             time.sleep(REQUEST_DELAY_SECONDS)
 
-    print(f"\n[GH] Total: {len(all_items)}")
+    # Fetch individual product pages for descriptions/specs.
+    # GH has ~69 active items — this adds ~69 requests but gives us full specs
+    # (body wood, pickups, neck, finish details) for much better matching.
+    print(f"\n[GH] Fetching descriptions for {len(all_items)} products...")
+    for i, item in enumerate(all_items):
+        desc = fetch_gh_product_description(item["url"])
+        item["description"] = desc
+        if (i + 1) % 10 == 0:
+            print(f"  [GH] {i + 1}/{len(all_items)} descriptions fetched")
+        time.sleep(REQUEST_DELAY_SECONDS)
+
+    print(f"\n[GH] Total: {len(all_items)} (with descriptions)")
     return all_items
 
 
@@ -611,6 +673,9 @@ def scrape_cme() -> List[Dict]:
 
                 specs = parse_guitar_specs(title, description)
 
+                images = product.get("images") or []
+                image_url = images[0].get("src", "") if images else ""
+
                 product_url = f"{CME_BASE}/products/{handle}"
                 for variant in product.get("variants", []):
                     if variant.get("available") is False:
@@ -629,6 +694,8 @@ def scrape_cme() -> List[Dict]:
                     )
                     all_items.append({
                         "source": "cme", "title": title,
+                        "description": description,
+                        "image_url": image_url,
                         "price_usd": price, "original_price_usd": compare_at,
                         "on_sale": on_sale, "discount_pct": discount_pct,
                         "url": product_url, "condition": condition,
@@ -712,9 +779,15 @@ def parse_ccm_page(html: str) -> List[Dict]:
         condition = parse_condition(title)
         specs     = parse_guitar_specs(title)
 
+        # Extract image URL from card
+        img_el = card.select_one("img")
+        cc_image_url = img_el.get("src", "") if img_el else ""
+
         items.append({
             "source":             "cream_city",
             "title":              title,
+            "description":        "",
+            "image_url":          cc_image_url,
             "price_usd":          current_price,
             "original_price_usd": original_price,
             "on_sale":            on_sale,
@@ -763,7 +836,28 @@ def scrape_cream_city(max_pages: int = 20) -> List[Dict]:
 
             time.sleep(REQUEST_DELAY_SECONDS)
 
-    print(f"\n[cream_city] Total: {len(all_items)}")
+    # Fetch individual product descriptions for better matching.
+    # Cream City has specs in "Label: Value" bullet format on product pages.
+    print(f"\n[cream_city] Fetching descriptions for {len(all_items)} products...")
+    for i, item in enumerate(all_items):
+        resp = safe_get(item["url"])
+        if resp:
+            try:
+                soup = BeautifulSoup(resp.text, "lxml")
+                desc_el = (
+                    soup.select_one("#tab-description")
+                    or soup.select_one("[class*='productView-description']")
+                    or soup.select_one(".product-description")
+                )
+                if desc_el:
+                    item["description"] = desc_el.get_text(" ", strip=True)
+            except Exception:
+                pass
+        if (i + 1) % 50 == 0:
+            print(f"  [cream_city] {i + 1}/{len(all_items)} descriptions fetched")
+        time.sleep(REQUEST_DELAY_SECONDS)
+
+    print(f"\n[cream_city] Total: {len(all_items)} (with descriptions)")
     return all_items
 
 
@@ -845,6 +939,7 @@ def parse_mgr_page(html: str) -> List[Dict]:
 
             items.append({
                 "source": "music_go_round", "title": title,
+                "description": "", "image_url": "",
                 "price_usd": price, "original_price_usd": None,
                 "on_sale": False, "discount_pct": 0.0,
                 "url": url, "condition": "used",
@@ -890,6 +985,7 @@ def parse_mgr_page(html: str) -> List[Dict]:
         items.append({
             "source":             "music_go_round",
             "title":              title,
+            "description":        "", "image_url": "",
             "price_usd":          float(current_price),
             "original_price_usd": original_price,
             "on_sale":            on_sale,
@@ -1061,7 +1157,36 @@ def parse_reverb_listing(listing: dict) -> Optional[Dict]:
         if not title or is_accessory_title(title):
             return None
 
-        if has_red_flags(title):
+        # Build description from Reverb's structured fields + free-text description.
+        # Many Reverb sellers use short titles ("Suhr Modern Plus") but put real specs
+        # in the structured fields (make, model, year, finish) and description text.
+        raw_desc = (listing.get("description") or "").strip()
+        make     = (listing.get("make") or "").strip()
+        model    = (listing.get("model") or "").strip()
+        year     = str(listing.get("year") or "").strip()
+        finish   = (listing.get("finish") or "").strip()
+
+        # Enrich title with structured fields when the title is vague.
+        # This ensures matching and red-flag checks see the real specs.
+        enrichment_parts = []
+        title_lower = title.lower()
+        if make and make.lower() not in title_lower:
+            enrichment_parts.append(make)
+        if model and model.lower() not in title_lower:
+            enrichment_parts.append(model)
+        if year and year not in title:
+            enrichment_parts.append(year)
+        if finish and finish.lower() not in title_lower:
+            enrichment_parts.append(finish)
+        if enrichment_parts:
+            title = title + " " + " ".join(enrichment_parts)
+            title = normalize_whitespace(title)
+
+        description = " | ".join(
+            p for p in [f"{make} {model}".strip(), year, finish, raw_desc] if p
+        )
+
+        if has_red_flags(title, description):
             return None
 
         price_data = listing.get("price", {})
@@ -1085,9 +1210,20 @@ def parse_reverb_listing(listing: dict) -> Optional[Dict]:
 
         condition = listing.get("condition", {}).get("display_name", "")
 
+        # Extract first photo URL for BUY NOW alerts
+        photos = listing.get("photos") or []
+        if photos:
+            photo_links = photos[0].get("_links", {})
+            image_url = (photo_links.get("large_crop", {}).get("href", "")
+                         or photo_links.get("full", {}).get("href", ""))
+        else:
+            image_url = ""
+
         return {
             "source":             "reverb",
             "title":              title,
+            "description":        description,
+            "image_url":          image_url,
             "price_usd":          price_usd,
             "original_price_usd": None,
             "on_sale":            False,   # Reverb used listings have one price
@@ -1131,16 +1267,41 @@ def scrape_reverb_query(query: str, max_pages: int = 3) -> List[Dict]:
     return items
 
 
-def scrape_reverb(max_pages_per_query: int = 3) -> List[Dict]:
-    """Scrape Reverb active US listings for target guitar brands/models."""
+def scrape_reverb(max_pages_per_query: int = 3,
+                   extra_queries: List[str] = None) -> List[Dict]:
+    """
+    Scrape Reverb active US listings for target guitar brands/models.
+
+    Args:
+        extra_queries: additional search queries (e.g. built from GH titles)
+                       to supplement the static REVERB_SEARCH_QUERIES list.
+    """
     all_items: List[Dict] = []
     seen_urls: Set[str]   = set()
 
-    print("\n=== Scrapeando Reverb (active listings) ===")
+    # Combine static + dynamic queries, deduplicate
+    queries = list(REVERB_SEARCH_QUERIES)
+    if extra_queries:
+        existing = {q.lower().strip() for q in queries}
+        for eq in extra_queries:
+            eq_clean = eq.lower().strip()
+            if eq_clean and eq_clean not in existing:
+                queries.append(eq)
+                existing.add(eq_clean)
 
-    for query in REVERB_SEARCH_QUERIES:
-        print(f"\n[Reverb] Query: '{query}'")
-        items = scrape_reverb_query(query, max_pages=max_pages_per_query)
+    static_set = {q.lower().strip() for q in REVERB_SEARCH_QUERIES}
+
+    print(f"\n=== Scrapeando Reverb (active listings) — {len(queries)} queries "
+          f"({len(REVERB_SEARCH_QUERIES)} static + "
+          f"{len(queries) - len(REVERB_SEARCH_QUERIES)} dynamic) ===")
+
+    for query in queries:
+        # Dynamic queries (from GH titles) use 1 page only to limit API load.
+        # Static queries use full max_pages_per_query (default 3).
+        is_dynamic = query.lower().strip() not in static_set
+        pages = 1 if is_dynamic else max_pages_per_query
+        print(f"\n[Reverb] Query: '{query}'" + (" (dynamic)" if is_dynamic else ""))
+        items = scrape_reverb_query(query, max_pages=pages)
 
         new_count = 0
         for item in items:
