@@ -79,6 +79,26 @@ def load_full_history() -> list[dict]:
     return result
 
 
+def get_fresh_posts(history: list[dict], hours: int = 48) -> list[dict]:
+    """
+    Return posts from the last N hours that have a price.
+    These represent guitars GH just posted — highest-confidence benchmark.
+    """
+    cutoff = datetime.now() - timedelta(hours=hours)
+    fresh = []
+    for row in history:
+        date_str = row.get("date", "")
+        if not date_str:
+            continue
+        try:
+            post_date = datetime.strptime(date_str, "%Y-%m-%d")
+        except (ValueError, TypeError):
+            continue
+        if post_date >= cutoff and (row.get("price_mxn") or row.get("price_usd")):
+            fresh.append(row)
+    return fresh
+
+
 def _parse_price(val: str) -> Optional[float]:
     val = str(val).strip()
     if not val:

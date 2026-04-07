@@ -4,6 +4,7 @@ import json
 import warnings
 from datetime import datetime
 from dotenv import load_dotenv
+from rapidfuzz import fuzz
 
 from scrapers import (
     scrape_guitarshome,
@@ -33,6 +34,7 @@ from catalog import (
     build_proactive_targets,
     build_liquidity_scores,
     get_liquidity,
+    get_fresh_posts,
 )
 from price_history import PriceHistory
 from deal_score import compute_deal_score, verdict_emoji, VERDICT_BUY, VERDICT_REVIEW
@@ -114,7 +116,14 @@ def _card(i: int, item: dict, full: bool = True) -> str:
     sale_str  = f"  {sale}\n" if sale else ""
     orig      = item.get("original_price_usd")
     orig_str  = f" (orig ${orig:,.0f})" if orig else ""
-    mode_tag  = "[PROACTIVO] " if item.get("proactive") else ""
+    if item.get("very_fresh"):
+        mode_tag = "[FRESH] "
+    elif item.get("fresh"):
+        mode_tag = "[RECIENTE] "
+    elif item.get("proactive"):
+        mode_tag = "[PROACTIVO] "
+    else:
+        mode_tag = ""
     # "All Original" warning: GH benchmark is for an all-original vintage guitar,
     # but US listing doesn't mention it → benchmark may be inflated 30-50%.
     _all_orig_kw = {"all original", "all orig", "100% original", "all-original"}
@@ -603,6 +612,108 @@ def main() -> None:
 
     print(f"Reactive: {len(ranked_matches)} matches, {len(opportunities)} oportunidades")
 
+    # ── MODE A.5: FRESH — recent Instagram posts (< 48hrs) as high-confidence targets ─
+    # A fresh GH Instagram post means: GH has the guitar NOW, price is current,
+    # demand is proven. We treat these like reactive matches but with lower margin
+    # threshold (25% instead of 30%) because the benchmark is very reliable.
+    fresh_posts = get_fresh_posts(full_history, hours=48)
+    # Also include posts up to 7 days old — GH posts ~1/day, a week covers latest inventory
+    recent_posts = get_fresh_posts(full_history, hours=168)
+    # Use the wider window but tag only < 48hrs as "FRESH"
+    fresh_titles = {p["title"] for p in fresh_posts}
+
+    if recent_posts and us_items:
+        print(f"\n--- Modo Fresh ({len(fresh_posts)} posts < 48hrs, {len(recent_posts)} < 7 dias) ---")
+        seen_us_urls_fresh = {m["us_url"] for m in ranked_matches}
+        fresh_min_margin = 0.25  # lower threshold for fresh intelligence
+
+        for post in recent_posts:
+            title = post["title"]
+            price_mxn = post.get("price_mxn") or 0
+            price_usd_raw = post.get("price_usd")
+            is_very_fresh = title in fresh_titles
+
+            # Skip if already matched in reactive mode (GH web listing = same guitar)
+            # We check by fuzzy matching the fresh title against existing matches
+            already_covered = False
+            for existing in ranked_matches:
+                if fuzz.token_set_ratio(
+                    title.lower(), existing["gh_title"].lower()
+                ) >= 85:
+                    already_covered = True
+                    break
+            if already_covered:
+                continue
+
+            # Create synthetic GH item from Instagram post
+            if price_mxn:
+                gh_price = price_mxn
+            elif price_usd_raw:
+                gh_price = price_usd_raw * usd_mxn
+            else:
+                continue
+
+            synthetic_gh = {"title": title, "price_mxn": gh_price, "url": ""}
+            best_match, score = find_best_match(synthetic_gh, us_items)
+            if not best_match or best_match["url"] in seen_us_urls_fresh:
+                continue
+
+            result = evaluate_match(
+                gh_title        = title,
+                gh_url          = post.get("url", ""),
+                gh_price_mxn    = 0,  # force Instagram benchmark lookup
+                us_item         = best_match,
+                score           = score,
+                usd_mxn         = usd_mxn,
+                logistics_usd   = logistics_usd,
+                min_margin      = fresh_min_margin,
+                min_match_score = min_match_score,
+                price_ratio_min = price_ratio_min,
+                price_ratio_max = price_ratio_max,
+                sold_catalog    = full_history,
+                reverb_sold_cache = reverb_sold_cache,
+                gh_reverb_shop  = gh_reverb_shop,
+                proactive       = True,
+                drop_urls       = drop_urls,
+                ph              = ph,
+            )
+            if result:
+                result["fresh"] = True
+                result["very_fresh"] = is_very_fresh
+                seen_us_urls_fresh.add(best_match["url"])
+                seen_us_urls.add(best_match["url"])
+                liq = get_liquidity(result["gh_title"], liquidity_scores)
+                result["liquidity"] = liq
+                ds = compute_deal_score(
+                    margin         = result["margin"],
+                    match_score    = result["score"],
+                    liquidity      = liq,
+                    on_sale        = result["on_sale"],
+                    had_price_drop = result["had_price_drop"],
+                    days_on_market = result["days_on_market"],
+                    source         = result["us_source"],
+                    condition      = result.get("us_condition", ""),
+                    aging_tier     = best_match.get("aging_tier"),
+                    flame_top      = best_match.get("flame_top"),
+                    has_brazilian  = best_match.get("has_brazilian", False),
+                    has_mods       = best_match.get("has_mods", False),
+                    no_coa         = best_match.get("no_coa", False),
+                    fresh_post     = is_very_fresh,
+                )
+                result["deal_score"] = ds
+                ranked_matches.append(result)
+                verdict = ds["verdict"]
+                if verdict == VERDICT_BUY:
+                    buy_now.append(result)
+                    opportunities.append(result)
+                elif result["opportunity"]:
+                    opportunities.append(result)
+                elif result["margin"] >= 0.20:
+                    near_misses.append(result)
+
+        fresh_matches = sum(1 for m in ranked_matches if m.get("fresh"))
+        print(f"Fresh: {fresh_matches} matches from recent IG posts")
+
     # ── MODE B: PROACTIVE — search US sources for GH's historical best sellers ─
     # Uses Instagram sold catalog to find guitars GH sells well even if not
     # currently listed on their website.
@@ -667,9 +778,6 @@ def main() -> None:
                     near_misses.append(result)
 
         print(f"Proactive added: {sum(1 for m in ranked_matches if m.get('proactive'))} matches")
-
-    # ── Close price history DB ────────────────────────────────────────────────
-    ph.close()
 
     # ── Sort results by deal score ────────────────────────────────────────────
     def _ds(x):
@@ -797,6 +905,9 @@ def main() -> None:
                         len(gh_items), us_counts)
     send_telegram_message(bot_token=bot_token, chat_id=chat_id, text=msg)
     print("\nNotificacion enviada.")
+
+    # ── Close price history DB ────────────────────────────────────────────────
+    ph.close()
 
 
 if __name__ == "__main__":

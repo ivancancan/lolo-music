@@ -226,6 +226,7 @@ def compute_deal_score(
     has_brazilian: bool = False,        # Brazilian rosewood fretboard
     has_mods: bool = False,             # pickups replaced, refret, hardware swap
     no_coa: bool = False,               # certificate of authenticity missing
+    fresh_post: bool = False,           # GH posted this guitar < 48hrs ago
 ) -> dict:
     """
     Compute a 0-100 deal score and return a full breakdown.
@@ -262,7 +263,11 @@ def compute_deal_score(
     s_source  = _score_source(source)
     s_spec    = _score_spec(aging_tier, flame_top, has_brazilian, has_mods, no_coa)
 
-    total = int(round(s_margin + s_liq + s_match + s_sale + s_dom + s_source + s_spec))
+    # Fresh post bonus: GH posted this guitar < 48hrs ago — benchmark is very
+    # reliable and there's a real-time arbitrage window. +7 pts.
+    s_fresh = 7.0 if fresh_post else 0.0
+
+    total = int(round(s_margin + s_liq + s_match + s_sale + s_dom + s_source + s_spec + s_fresh))
     total = max(0, min(100, total))
 
     # Condition penalty: deduct points for below-excellent condition
@@ -305,6 +310,8 @@ def compute_deal_score(
         flags.append("SIN COA — valor reducido 15-20%")
     if has_mods:
         flags.append("MODIFICADA — coleccionistas pagan menos")
+    if fresh_post:
+        flags.append("FRESH FROM GH — publicado < 48hrs")
     if condition:
         flags.append(f"Condicion: {condition}")
     if days_on_market and days_on_market >= 45:
@@ -321,6 +328,7 @@ def compute_deal_score(
             "dom":       s_dom,
             "source":    s_source,
             "spec":      s_spec,
+            "fresh":     s_fresh,
         },
         "flags": flags,
     }
