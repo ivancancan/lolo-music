@@ -861,6 +861,27 @@ def is_hard_match(gh_title: str, us_title: str,
     if gh_has_anniv != us_has_anniv:
         return False
 
+    # Explorer Reverse check: the Reverse Explorer has an inverted body shape and
+    # is a limited/collector's item (Guitar of the Month, etc.) — completely different
+    # guitar from a standard Explorer or 70's Explorer reissue.
+    gh_reverse = "reverse" in normalize_title(gh_effective)
+    us_reverse = "reverse" in normalize_title(us_effective)
+    if gh_family == "explorer" or us_family == "explorer":
+        if gh_reverse != us_reverse:
+            return False
+
+    # Taylor model series check: Taylor uses 3-digit model numbers where the
+    # hundreds digit indicates the series tier (4xx, 5xx, 7xx, 8xx, 9xx).
+    # A 716ce (700-series, rosewood) ≠ 416ce (400-series, ovangkol) — different
+    # tonewoods, different price tier (~$500-1500 gap between adjacent series).
+    _taylor_series_re = re.compile(r'\b([3-9])\d{2}ce?\b', re.I)
+    if extract_brand(gh_effective) == "taylor" or extract_brand(us_effective) == "taylor":
+        gh_series = _taylor_series_re.search(gh_effective)
+        us_series = _taylor_series_re.search(us_effective)
+        if gh_series and us_series:
+            if gh_series.group(1) != us_series.group(1):
+                return False
+
     return True
 
 
