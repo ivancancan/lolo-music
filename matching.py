@@ -50,11 +50,18 @@ def detect_guitar_type(title: str) -> str:
 
     for model in ACOUSTIC_MODELS:
         model_clean = re.sub(r"[^a-z0-9]", "", model)
-        if model in text or model_clean in text_clean:
+        # text match: use word boundary so "l-2" doesn't match inside longer words
+        if re.search(r'\b' + re.escape(model) + r'\b', text):
+            return "acoustic"
+        # text_clean match: only use for models ≥4 chars to avoid substring collisions
+        # (e.g., "l2" matching "serial201550093yourg" → false positive)
+        if len(model_clean) >= 4 and model_clean in text_clean:
             return "acoustic"
     for model in ELECTRIC_ONLY_MODELS:
         model_clean = re.sub(r"[^a-z0-9]", "", model)
-        if model in text or model_clean in text_clean:
+        if re.search(r'\b' + re.escape(model) + r'\b', text):
+            return "electric"
+        if len(model_clean) >= 4 and model_clean in text_clean:
             return "electric"
     return ""
 
