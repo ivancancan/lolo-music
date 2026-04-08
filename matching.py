@@ -683,8 +683,10 @@ def is_hard_match(gh_title: str, us_title: str,
 
     # Brazilian rosewood check: adds $2,000-5,000+ vs Indian rosewood.
     # If one side explicitly declares Brazilian and the other doesn't, it's a different guitar.
-    gh_brazilian = detect_brazilian(gh_effective)
-    us_brazilian = detect_brazilian(us_effective)
+    # Use title-only (not effective/description) — descriptions often mention "Brazilian" contextually
+    # (e.g. seller comparing materials) without the guitar actually having Brazilian rosewood.
+    gh_brazilian = detect_brazilian(gh_title)
+    us_brazilian = detect_brazilian(us_title)
     if gh_brazilian != us_brazilian:
         return False
 

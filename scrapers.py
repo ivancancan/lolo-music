@@ -1818,3 +1818,20 @@ def scrape_sam_ash(max_pages: int = 5) -> List[Dict]:
 
     print(f"\n[Sam Ash] Total: {len(all_items)}")
     return all_items
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Retrofret Vintage Instruments  (Shopify, US — Brooklyn, NY)
+# Curated vintage and used guitars. Heavy on Gibson/Fender/Gretsch vintage.
+# All products are truly vintage/used — 100% relevant inventory.
+# ─────────────────────────────────────────────────────────────────────────────
+
+RETROFRET_BASE = "https://www.retrofret.com"
+RETROFRET_COLLECTION_HANDLES = [
+    "electric-guitars",
+    "acoustic-guitars",
+]
+
+
+def scrape_retrofret() -> List[Dict]:
+    return scrape_shopify_store(RETROFRET_BASE, RETROFRET_COLLECTION_HANDLES, "retrofret")

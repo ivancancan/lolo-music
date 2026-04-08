@@ -83,6 +83,7 @@ SOURCE_TRUST = {
     "ebay":           3,
     "sam_ash":        3,
     "music_go_round": 3,
+    "retrofret":      5,   # Brooklyn vintage dealer, curated used/vintage
     "reverb":         1,
 }
 

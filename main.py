@@ -18,6 +18,7 @@ from scrapers import (
     scrape_elderly,
     scrape_normans,
     scrape_toneshop,
+    scrape_retrofret,
     scrape_ebay,
     scrape_guitar_center,
     scrape_sam_ash,
@@ -59,6 +60,7 @@ SOURCE_LABELS = {
     "twin_town":      "Twin Town Guitars",
     "normans":        "Norman's Rare Guitars",
     "toneshop":       "Tone Shop Guitars",
+    "retrofret":      "Retrofret Vintage",
     "cme":            "Chicago Music Exchange",
     "cream_city":     "Cream City Music",
     "music_go_round": "Music Go Round",
@@ -474,6 +476,9 @@ def main() -> None:
     print("\nScraping Tone Shop Guitars...")
     toneshop_items = scrape_toneshop()
 
+    print("\nScraping Retrofret Vintage Instruments...")
+    retrofret_items = scrape_retrofret()
+
     # eBay, Guitar Center, Sam Ash blocked by bot detection — disabled
     ebay_items = []
     gc_items   = []
@@ -507,7 +512,7 @@ def main() -> None:
     us_items = (
         daves_items + wildwood_items + graysons_items + twin_town_items +
         cme_items + cream_items + mgr_items + elderly_items +
-        normans_items + toneshop_items + reverb_items
+        normans_items + toneshop_items + retrofret_items + reverb_items
     )
 
     us_counts = {
@@ -521,6 +526,7 @@ def main() -> None:
         "elderly":        len(elderly_items),
         "normans":        len(normans_items),
         "toneshop":       len(toneshop_items),
+        "retrofret":      len(retrofret_items),
         "reverb":         len(reverb_items),
     }
 
