@@ -26,11 +26,17 @@ MIN_PRICE_USD          = 400.0   # Reject accessories, parts, straps, etc.
 ACCESSORY_KEYWORDS = {
     "gig bag", "tremolo arm", "whammy bar",
     # Non-guitar gear that leaks through mixed collections (CME price-drops, etc.)
-    "amplifier", "amp head", "amp combo", "combo amp", "guitar combo",
+    "amplifier", "amplification",  # "Carstens Amplification" etc.
+    "amp head", "amp combo", "combo amp", "guitar combo",
     "guitar amp", "bass amp", "bass head", "bass combo",
+    "reverb head", "reverb combo",  # e.g. "Fender '65 Twin Reverb Head"
+    "tube head", "tube combo",
     "speaker cabinet", "speaker cab",
     "preamp", "power amp", "attenuator",
     "pedalboard", "power supply",
+    "envelope filter", "envelope follower",  # Lovetone Meatball etc.
+    "synthesizer", "semi-modular", "analog synth",  # Moog, etc.
+    "keyboard", "organ", "piano",
     "lap steel", "steel guitar", "pedal steel",
     "banjo", "mandolin", "ukulele", "violin", "cello",
     "drum", "cymbal", "snare", "hi-hat",
@@ -1098,38 +1104,79 @@ REVERB_HEADERS  = {
     "Accept-Version": "3.0",
 }
 
-# Focused queries on brands/models that Guitar's Home typically carries
+# Focused queries on brands/models that Guitar's Home typically carries.
+# Year range (2015+) applied at query time via year_min param.
 REVERB_SEARCH_QUERIES = [
+    # Gibson electrics — most of GH's inventory
     "gibson les paul standard",
+    "gibson les paul standard 50s",
+    "gibson les paul standard 60s",
     "gibson les paul custom",
     "gibson les paul traditional",
+    "gibson custom shop les paul",
+    "gibson custom shop murphy lab",
+    "gibson custom shop 1959 les paul",
+    "gibson custom shop 1960 les paul",
     "gibson sg standard",
     "gibson sg custom",
     "gibson es-335",
     "gibson es-339",
+    "gibson es-345",
     "gibson flying v",
     "gibson explorer",
     "gibson firebird",
-    "fender american stratocaster",
-    "fender american telecaster",
+    # Gibson acoustics
+    "gibson j-45",
+    "gibson j-200",
+    "gibson hummingbird",
+    "gibson dove",
+    # Fender electrics
+    "fender american professional stratocaster",
+    "fender american professional telecaster",
+    "fender american ultra stratocaster",
+    "fender american ultra telecaster",
+    "fender custom shop stratocaster",
+    "fender custom shop telecaster",
     "fender jazzmaster",
     "fender jaguar",
+    # PRS
     "prs custom 24",
     "prs custom 22",
     "prs mccarty",
     "prs ce 24",
     "prs hollowbody",
+    "prs wood library",
+    "prs private stock",
+    "prs se custom",
+    # Gretsch
     "gretsch country gentleman",
     "gretsch white falcon",
     "gretsch electromatic",
+    "gretsch streamliner",
+    # Taylor acoustics — GH sells many
+    "taylor 314ce",
+    "taylor 414ce",
+    "taylor 714ce",
+    "taylor 814ce",
+    "taylor 314",
+    "taylor grand auditorium",
+    # Music Man
     "music man axis",
     "music man luke",
     "music man silhouette",
+    "music man majesty",
+    "music man jp7",
+    # Suhr
     "suhr modern electric",
     "suhr classic electric",
+    "suhr standard electric",
+    # Other GH regulars
     "collings i-35",
     "collings 290",
     "charvel san dimas",
+    "charvel guthrie govan",
+    "rickenbacker 360",
+    "rickenbacker 330",
 ]
 
 
@@ -1208,7 +1255,13 @@ def parse_reverb_listing(listing: dict) -> Optional[Dict]:
         if not url:
             return None
 
-        condition = listing.get("condition", {}).get("display_name", "")
+        # Reverb condition display_name ("Very Good", "Excellent") → canonical scale ("VG", "Excellent")
+        condition_raw = listing.get("condition", {}).get("display_name", "")
+        condition = parse_condition(condition_raw) or condition_raw
+
+        # Skip listings below minimum acceptable condition
+        if condition and CONDITION_SCORE.get(condition, 1.0) < MIN_CONDITION_SCORE:
+            return None
 
         # Extract first photo URL for BUY NOW alerts
         photos = listing.get("photos") or []
