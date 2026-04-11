@@ -242,8 +242,73 @@ def _card(i: int, item: dict, full: bool = True) -> str:
     )
 
 
-def build_message(opportunities, near_misses, ranked_matches,
-                  gh_count: int, us_counts: dict) -> str:
+def _card_caption(i: int, item: dict) -> str:
+    """
+    Short caption for Telegram photo messages (≤1024 chars).
+    Contains the essential deal info without the full guide text.
+    """
+    ds       = item.get("deal_score", {})
+    ds_total = ds.get("total", 0)
+    verdict  = ds.get("verdict", "")
+    flags    = ds.get("flags", [])
+
+    if item.get("very_fresh"):
+        mode_tag = "[FRESH] "
+    elif item.get("fresh"):
+        mode_tag = "[RECIENTE] "
+    elif item.get("proactive"):
+        mode_tag = "[PROACTIVO] "
+    else:
+        mode_tag = ""
+
+    dom     = item.get("days_on_market")
+    dom_str = f" | {dom}d en venta" if dom else ""
+
+    reverb_avg = item.get("reverb_sold_avg_usd")
+    reverb_str = f"Reverb ref: ${reverb_avg:,.0f} USD\n" if reverb_avg else ""
+
+    liq     = item.get("liquidity")
+    liq_str = ""
+    if liq:
+        avg_d     = liq["avg_days_to_sell"]
+        avg_d_str = "< 60" if avg_d < 3 else f"~{avg_d:.0f}"
+        liq_str   = f"Liquidez: {avg_d_str}d | {liq['sell_rate']*100:.0f}% vendidas\n"
+
+    sell_mxn     = item.get("suggested_sell_mxn", 0)
+    sell_mxn_str = f"Venta MX: ${sell_mxn:,.0f} MXN\n" if sell_mxn else ""
+
+    offer_str = ""
+    if dom and dom >= 45:
+        offer_str = f"OFERTA SUGERIDA: ${round(item['us_price_usd'] * 0.90):,} USD\n"
+
+    flags_str  = f"{' | '.join(flags)}\n" if flags else ""
+    target_str = "★ GUITARRA OBJETIVO (Fase 1)\n" if is_validation_target(item.get("gh_title", "")) else ""
+    verdict_str = f"{verdict_emoji(verdict)}  ({ds_total}/100)\n" if verdict else ""
+
+    cap = (
+        f"{i}. {mode_tag}{item['gh_title']}\n"
+        f"{verdict_str}"
+        f"{target_str}"
+        f"{flags_str}"
+        f"Fuente: {fmt_source(item['us_source'])} [{item.get('us_condition','')}]{dom_str}\n"
+        f"Compra: ${item['us_price_usd']:,.0f} USD | Landed: ${item['landed_cost_usd']:,.0f} USD\n"
+        f"Benchmark: {benchmark_label(item)}\n"
+        f"{sell_mxn_str}"
+        f"{reverb_str}"
+        f"{liq_str}"
+        f"Margen: {item['margin']*100:.1f}% | Match: {item['score']} | Deal: {ds_total}/100\n"
+        f"{offer_str}"
+        f"US: {item['us_url']}"
+    )
+    # Hard truncate at Telegram's 1024-char caption limit
+    if len(cap) > 1024:
+        cap = cap[:1021] + "..."
+    return cap
+
+
+def build_header(opportunities, near_misses, ranked_matches,
+                 gh_count: int, us_counts: dict) -> str:
+    """Summary header + guide sent as the first text message of the report."""
     total_us  = sum(us_counts.values())
     count_str = ", ".join(f"{fmt_source(k)}: {v}" for k, v in us_counts.items())
 
@@ -254,30 +319,33 @@ def build_message(opportunities, near_misses, ranked_matches,
         f"Matches evaluados: {len(ranked_matches)}",
         f"Near misses (margen 20-30%): {len(near_misses)}",
         f"Oportunidades (margen 30%+): {len(opportunities)}\n",
-        "---- GUIA DEL REPORTE ----",
-        "[REACTIVO] = guitarra que GH vende HOY en su web → encontramos la misma mas barata en EE.UU.",
-        "[PROACTIVO] = modelo que GH ha vendido historicamente (Instagram) → buscamos activamente en EE.UU.",
-        "",
-        "Campos de cada oportunidad:",
-        "  Listing   = titulo exacto del producto en la tienda EE.UU.",
-        "  Compra    = precio en tienda EE.UU. (lo que pagas tu)",
-        "  Landed    = compra + $150 USD logistica (costo real puesto en MX)",
-        "  Benchmark = precio al que GH lo vende en USD (tu precio objetivo)",
-        "  Venta MX  = precio sugerido de venta en MXN (igual a GH o estimado 37% ROI)",
-        "  Margen    = (benchmark - landed) / landed  → ganancia bruta",
-        "  Match     = confianza del match 0-100 (>85 = muy confiable)",
-        "  Deal      = score 0-100 combinando margen+liquidez+condicion+fuente",
-        "  Liquidez  = estimado de dias que tarda en venderse en Mexico",
-        "  Reverb ref= precio promedio vendido en Reverb EE.UU. (referencia, no benchmark)",
-        "  Condicion = estado fisico reportado por la tienda (Excellent/VG+/VG)",
-        "",
+        "Veredictos:",
+        "  *** COMPRA AHORA *** = Deal score >= 75",
+        "  >> REVISAR          = Deal score 50-74",
+        "  -- ignorar          = Deal score < 50",
+        "\nREGLA: Margen bruto >= 30% para proceder.",
+    ]
+    return "\n".join(lines)
+
+
+def build_message(opportunities, near_misses, ranked_matches,
+                  gh_count: int, us_counts: dict) -> str:
+    """Legacy full-text report (used as fallback when no photo sending)."""
+    total_us  = sum(us_counts.values())
+    count_str = ", ".join(f"{fmt_source(k)}: {v}" for k, v in us_counts.items())
+
+    lines = [
+        "LOLO MUSIC — Reporte de Arbitraje\n",
+        f"Guitar's Home: {gh_count} guitarras activas",
+        f"Fuentes US ({total_us}): {count_str}",
+        f"Matches evaluados: {len(ranked_matches)}",
+        f"Near misses (margen 20-30%): {len(near_misses)}",
+        f"Oportunidades (margen 30%+): {len(opportunities)}\n",
         "Veredictos:",
         "  *** COMPRA AHORA *** = Deal score >= 75, accion inmediata",
         "  >> REVISAR          = Deal score 50-74, evalua antes de comprar",
         "  -- ignorar          = Deal score < 50",
-        "",
-        "REGLA: Margen bruto >= 30% para proceder.",
-        "--------------------------\n",
+        "\nREGLA: Margen bruto >= 30% para proceder.\n",
     ]
 
     if opportunities:
@@ -1008,9 +1076,35 @@ def main() -> None:
         send_telegram_message(bot_token=bot_token, chat_id=chat_id, text="\n".join(drop_lines))
 
     # ── Telegram: full report ─────────────────────────────────────────────────
-    msg = build_message(opportunities, near_misses, ranked_matches,
-                        len(gh_items), us_counts)
-    send_telegram_message(bot_token=bot_token, chat_id=chat_id, text=msg)
+    # Header (summary stats) as text first
+    header = build_header(opportunities, near_misses, ranked_matches,
+                          len(gh_items), us_counts)
+    send_telegram_message(bot_token=bot_token, chat_id=chat_id, text=header)
+
+    # Actionable items: each gets a photo preview + caption
+    actionable = opportunities or near_misses
+    if actionable:
+        section_label = "OPORTUNIDADES:" if opportunities else "Near misses (20%+):"
+        send_telegram_message(bot_token=bot_token, chat_id=chat_id, text=section_label)
+        for i, item in enumerate(actionable, 1):
+            caption = _card_caption(i, item)
+            img     = item.get("image_url", "")
+            if img:
+                send_telegram_photo(bot_token=bot_token, chat_id=chat_id,
+                                    photo_url=img, caption=caption)
+            else:
+                send_telegram_message(bot_token=bot_token, chat_id=chat_id, text=caption)
+    elif ranked_matches:
+        # No actionable items — send top matches as plain text (informativo)
+        top_lines = ["Sin 20%+. Top matches:\n"]
+        for i, item in enumerate(ranked_matches[:10], 1):
+            top_lines.append(_card(i, item, full=False))
+        send_telegram_message(bot_token=bot_token, chat_id=chat_id,
+                              text="\n".join(top_lines))
+    else:
+        send_telegram_message(bot_token=bot_token, chat_id=chat_id,
+                              text="No se encontraron matches.")
+
     print("\nNotificacion enviada.")
 
     # ── Close price history DB ────────────────────────────────────────────────
