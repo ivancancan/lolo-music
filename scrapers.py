@@ -204,17 +204,48 @@ _NO_COA_KEYWORDS = [
     "certificate not included", "no cert", "coa not included",
 ]
 
+# Keywords that indicate an original hard-shell case is included.
+# OHSC adds $200-400 to resale value in MX (shipping risk + collectibility).
+_OHSC_KEYWORDS = [
+    "original hard shell", "original hardshell", "original hard-shell",
+    "ohsc", "o.h.s.c", "original case", "original hard case",
+    "original gibson case", "original fender case", "original prs case",
+    "original tolex", "original brown case", "original black case",
+]
+
+# Keywords that indicate weight-relieved / chambered body.
+# Gibson LPs 2012-2018 often have this; collectors pay 10-20% less.
+_WEIGHT_RELIEF_KEYWORDS = [
+    "weight relief", "weight relieved", "weight-relieved",
+    "weight-relief", "chambered", "ultra lightweight",
+    "lightweight body", "light weight relief",
+]
+
+
+def _detect_ohsc(text: str) -> bool:
+    """Returns True if the listing mentions an original hard-shell case."""
+    low = text.lower()
+    return any(kw in low for kw in _OHSC_KEYWORDS)
+
+
+def _detect_weight_relieved(text: str) -> bool:
+    """Returns True if the guitar has a chambered/weight-relieved body."""
+    low = text.lower()
+    return any(kw in low for kw in _WEIGHT_RELIEF_KEYWORDS)
+
 
 def parse_guitar_specs(title: str, description: str = "") -> dict:
     """
     Extract price-relevant spec attributes from a guitar title and description.
 
     Returns a dict with:
-      aging_tier   — int 0-5 or None (from detect_aging_tier)
-      flame_top    — 'figured', 'plain', or None
-      has_brazilian — bool
-      has_mods     — bool  (pickups replaced, refret, hardware swap)
-      no_coa       — bool  (certificate of authenticity absent)
+      aging_tier        — int 0-5 or None (from detect_aging_tier)
+      flame_top         — 'figured', 'plain', or None
+      has_brazilian     — bool
+      has_mods          — bool  (pickups replaced, refret, hardware swap)
+      no_coa            — bool  (certificate of authenticity absent)
+      has_ohsc          — bool  (original hard-shell case included, +$200-400 MX value)
+      is_weight_relieved — bool (chambered/weight-relieved body, -10-20% collector value)
     """
     combined = (title + " " + description).lower()
 
@@ -223,16 +254,20 @@ def parse_guitar_specs(title: str, description: str = "") -> dict:
     has_brazilian = detect_brazilian(title)
     flame_top     = detect_flame_top(title)
 
-    # Mods and COA are typically mentioned in the description
-    has_mods = any(kw in combined for kw in _MOD_KEYWORDS)
-    no_coa   = any(kw in combined for kw in _NO_COA_KEYWORDS)
+    # Mods, COA, case, and body type from description
+    has_mods         = any(kw in combined for kw in _MOD_KEYWORDS)
+    no_coa           = any(kw in combined for kw in _NO_COA_KEYWORDS)
+    has_ohsc         = _detect_ohsc(combined)
+    is_weight_relieved = _detect_weight_relieved(combined)
 
     return {
-        "aging_tier":    aging_tier,
-        "flame_top":     flame_top,
-        "has_brazilian": has_brazilian,
-        "has_mods":      has_mods,
-        "no_coa":        no_coa,
+        "aging_tier":         aging_tier,
+        "flame_top":          flame_top,
+        "has_brazilian":      has_brazilian,
+        "has_mods":           has_mods,
+        "no_coa":             no_coa,
+        "has_ohsc":           has_ohsc,
+        "is_weight_relieved": is_weight_relieved,
     }
 
 
@@ -607,10 +642,11 @@ def scrape_twin_town() -> List[Dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 CME_BASE = "https://www.chicagomusicexchange.com"
-# vintage-used  = dedicated used/vintage collection (~825 available)
-# price-drops   = all-category discounted gear (~1,358 available)
-# Both are filtered by tag to keep only guitars (not basses, acoustics, accessories)
+# electric-guitars-used = modern used electrics (2,200+ items, ~135 available at any time)
+# vintage-used          = vintage/collectible instruments (pre-~1990)
+# price-drops           = cross-category price drops (mixed gear)
 CME_COLLECTION_HANDLES = [
+    "electric-guitars-used",
     "vintage-used",
     "price-drops",
 ]
@@ -651,11 +687,20 @@ def scrape_cme() -> List[Dict]:
                 if handle in seen_handles:
                     continue
 
-                # For electric-guitars collection, skip brand-new inventory
+                # electric-guitars-used: all items are used by collection definition — no tag filter needed
+                # For any other mixed collection, skip brand-new inventory via tag check
                 tags_lower = {t.lower() for t in product.get("tags", [])}
-                if collection_handle == "electric-guitars":
-                    if not tags_lower & CME_USED_TAGS:
-                        continue  # brand new, skip
+                if collection_handle not in ("electric-guitars-used", "vintage-used"):
+                    is_new = any(
+                        ("new inventory" in tag or "item condition : brand new" in tag)
+                        for tag in tags_lower
+                    )
+                    is_used = any(
+                        any(k in tag for k in ("used", "vintage / used", "new-to-used", "store demo", "consignment"))
+                        for tag in tags_lower
+                    )
+                    if is_new or not is_used:
+                        continue  # skip new or ambiguous items
 
                 seen_handles.add(handle)
                 title = normalize_whitespace(product.get("title", "").strip())
@@ -1272,6 +1317,12 @@ def parse_reverb_listing(listing: dict) -> Optional[Dict]:
         else:
             image_url = ""
 
+        # "Offers accepted" — seller open to negotiation, ~10% below list is realistic
+        offers_enabled = bool(listing.get("offers_enabled", False))
+
+        # Parse all spec attributes from title + description
+        specs = parse_guitar_specs(title, description)
+
         return {
             "source":             "reverb",
             "title":              title,
@@ -1283,6 +1334,8 @@ def parse_reverb_listing(listing: dict) -> Optional[Dict]:
             "discount_pct":       0.0,
             "url":                url,
             "condition":          condition,
+            "offers_enabled":     offers_enabled,
+            **specs,
         }
 
     except (ValueError, TypeError, AttributeError):

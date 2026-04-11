@@ -164,6 +164,17 @@ MODEL_KEYWORDS = {
     "grand theater",     # Taylor Grand Theater (e.g. GT 811) — compact body
     "t3",               # Taylor T3 — semi-hollow electric, ≠ any acoustic Taylor
     "t5",               # Taylor T5 — hollow electric, ≠ T3 or acoustics
+    # Gibson acoustic models — each is a distinct body/price class, must never cross-match
+    "sj-200",           # Gibson SJ-200 — Super Jumbo, ≠ J-45/J-50/Hummingbird/Dove
+    "sj200",
+    "j-200",            # alternate name for SJ-200
+    "j200",
+    "j-45",             # Gibson J-45 — slope-shoulder dreadnought, ≠ SJ-200/Hummingbird/J-50
+    "j45",
+    "j-50",             # Gibson J-50 — natural-top variant of J-45 family
+    "j50",
+    "hummingbird",      # Gibson Hummingbird — square-shoulder dreadnought, ≠ J-45/SJ-200
+    "dove",             # Gibson Dove — square-shoulder with ornamentation, ≠ Hummingbird
     # Suhr models
     "modern plus",      # Suhr Modern Plus — distinct from Modern, Classic S, Classic T
     "modern",           # Suhr Modern — base model, ≠ Modern Plus (different electronics)
@@ -621,6 +632,16 @@ def is_hard_match(gh_title: str, us_title: str,
     if gh_pickups and us_pickups and gh_pickups.isdisjoint(us_pickups):
         return False
 
+    # One-sided P-90 check: if GH benchmark explicitly names P-90 pickups and US listing
+    # doesn't mention any pickup config → reject. A Les Paul Standard P-90 ($3,000+) is
+    # a specific product different from the humbucker LP Standard ($2,200-2,500).
+    # We check effective text (title+desc) for P-90 keywords on both sides.
+    _p90_re = re.compile(r'\bp-?90\b', re.I)
+    gh_p90_explicit = bool(_p90_re.search(gh_effective))
+    us_p90_explicit = bool(_p90_re.search(us_effective))
+    if gh_p90_explicit and not us_p90_explicit:
+        return False
+
     # Quilt Top / figured top check: a "10 Top" or "Quilt Top" PRS carries a significant
     # visual and resale premium over the plain-top version of the same model ($300-800 USD).
     # If GH explicitly lists a quilt/figured top and US doesn't mention it, don't match.
@@ -646,6 +667,15 @@ def is_hard_match(gh_title: str, us_title: str,
     gh_goldtop = "goldtop" in normalize_title(gh_effective) or "gold top" in normalize_title(gh_effective)
     us_goldtop = "goldtop" in normalize_title(us_effective) or "gold top" in normalize_title(us_effective)
     if gh_goldtop and not us_goldtop:
+        return False
+
+    # Artisan check: Fender Custom Shop "Artisan" is a premium sub-line with figured
+    # exotic tonewoods (roasted rosewood neck, figured rosewood body, etc.).
+    # Commands $1,500-2,000 more than a regular Custom Shop Classic/Deluxe.
+    # If GH benchmark is an Artisan and US listing isn't → benchmark mismatch.
+    gh_artisan = "artisan" in normalize_title(gh_effective)
+    us_artisan = "artisan" in normalize_title(us_effective)
+    if gh_artisan and not us_artisan:
         return False
 
     # Guitar type check: acoustic vs electric — never match across types.
@@ -725,12 +755,19 @@ def is_hard_match(gh_title: str, us_title: str,
     if gh_tier and us_tier and gh_tier.isdisjoint(us_tier):
         return False
 
-    # Finish check: if both declare finish tokens that share nothing, it's a different colorway.
-    # Use effective text so finish mentioned in description is caught.
+    # Finish check: only reject when one side has a PREMIUM/DISTINCTIVE finish that the other
+    # doesn't share. Generic color names ("tobacco", "cherry", "burst") are just color variants
+    # of the same model — rejecting on those causes false negatives (e.g. LP Tobacco Burst vs
+    # LP Heritage Cherry). Goldtop is already handled by its own filter above.
+    # Only finishes that carry a real price premium (natural, pelham, seafoam, olympic, fiesta)
+    # or that are structurally distinct should disqualify.
+    _PREMIUM_FINISH = {"natural", "pelham", "seafoam", "surf", "olympic", "fiesta", "blonde"}
     gh_finish = extract_finish_tokens(gh_effective)
     us_finish = extract_finish_tokens(us_effective)
-    if gh_finish and us_finish and gh_finish.isdisjoint(us_finish):
-        return False
+    gh_premium = gh_finish & _PREMIUM_FINISH
+    us_premium = us_finish & _PREMIUM_FINISH
+    if gh_premium and not (gh_premium & us_finish):
+        return False  # GH has premium finish, US has nothing matching it
 
     # Finishing type check: Relic ≠ NOS — different aesthetic, different price category.
     # A Relic Custom Shop and an NOS Custom Shop of the same model can differ by $1,000-2,000 USD.
@@ -891,6 +928,32 @@ def is_hard_match(gh_title: str, us_title: str,
             if gh_series.group(1) != us_series.group(1):
                 return False
 
+    # Body wood mismatch check for custom-order brands (Suhr, Tom Anderson, etc.).
+    # Custom builders make the same model name with different body woods (alder vs
+    # basswood vs ash vs mahogany) — these are effectively different guitars with
+    # different tonal profiles and price points ($200-600 difference).
+    _CUSTOM_BRANDS = {"suhr", "tom anderson", "anderson", "tyler", "james tyler",
+                      "sadowsky", "nash", "k-line", "collings"}
+    _BODY_WOODS = {"alder", "basswood", "ash", "swamp ash", "mahogany", "korina",
+                   "poplar", "maple", "limba", "pine", "paulownia", "chambered"}
+    _brand = extract_brand(gh_effective)
+    if _brand in _CUSTOM_BRANDS:
+        gh_woods = {w for w in _BODY_WOODS if w in normalize_title(gh_effective)}
+        us_woods = {w for w in _BODY_WOODS if w in normalize_title(us_effective)}
+        if gh_woods and us_woods and gh_woods.isdisjoint(us_woods):
+            return False
+
+    # Pickup configuration mismatch for custom brands: HSS ≠ SSS ≠ HH.
+    # Standard guitars (Gibson HH, Fender SSS) don't usually declare this in titles,
+    # but custom builders always do because it's a build choice.
+    _PICKUP_CONFIGS = {"hss", "ssh", "hsh", "hhh", "hh", "sss", "ss", "h-s-s",
+                       "h-s-h", "s-s-s"}
+    if _brand in _CUSTOM_BRANDS:
+        gh_config = {c for c in _PICKUP_CONFIGS if c in normalize_title(gh_effective)}
+        us_config = {c for c in _PICKUP_CONFIGS if c in normalize_title(us_effective)}
+        if gh_config and us_config and gh_config != us_config:
+            return False
+
     return True
 
 
@@ -975,76 +1038,103 @@ def build_reverb_sold_query(title: str) -> str:
 
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _score_candidate(gh_item: Dict, us_item: Dict, gh_year: int | None) -> int | None:
+    """Score a single US item against a GH item. Returns score or None if no match."""
+    if not is_hard_match(gh_item["title"], us_item["title"],
+                         gh_desc=gh_item.get("description", ""),
+                         us_desc=us_item.get("description", "")):
+        return None
+
+    # Score from titles only
+    title_score = fuzzy_score(gh_item["title"], us_item["title"])
+
+    # Score from title + description: when US title is vague but description has
+    # the real specs, this recovers matches that title-only scoring would miss.
+    us_desc = us_item.get("description", "")
+    desc_spec_terms = _extract_spec_terms(us_desc)
+    if desc_spec_terms:
+        enriched_us = us_item["title"] + " " + desc_spec_terms
+        desc_score = fuzzy_score(gh_item["title"], enriched_us)
+    else:
+        desc_score = title_score
+
+    score = max(title_score, desc_score)
+
+    # Vague-title penalty
+    gh_tokens = tokenize(gh_item["title"])
+    us_tokens = tokenize(us_item["title"])
+    if len(us_tokens) > 0 and len(gh_tokens) > 0:
+        token_ratio = len(us_tokens) / len(gh_tokens)
+        if token_ratio < 0.50:
+            gh_set = set(gh_tokens)
+            us_set = set(us_tokens)
+            missing_from_title = gh_set - us_set
+            if missing_from_title and desc_spec_terms:
+                desc_tokens = set(normalize_title(desc_spec_terms).split())
+                recovered = missing_from_title & desc_tokens
+                recovery_ratio = len(recovered) / len(missing_from_title) if missing_from_title else 0
+            else:
+                recovery_ratio = 0.0
+            if recovery_ratio >= 0.50:
+                score = max(0, score - 8)
+            else:
+                score = max(0, score - 25)
+
+    # Year proximity bonus/penalty
+    us_year = extract_year(us_item["title"])
+    if gh_year and us_year and gh_year >= MODERN_YEAR_MIN and us_year >= MODERN_YEAR_MIN:
+        year_diff = abs(gh_year - us_year)
+        if year_diff == 0:
+            score = min(100, score + 4)
+        elif year_diff == 1:
+            score = min(100, score + 1)
+        else:
+            score = max(0, score - 3)
+
+    return score
+
+
 def find_best_match(gh_item: Dict, us_items: List[Dict]) -> Tuple[Optional[Dict], int]:
     best_item = None
     best_score = 0
-
     gh_year = extract_year(gh_item["title"])
 
     for us_item in us_items:
-        if not is_hard_match(gh_item["title"], us_item["title"],
-                             gh_desc=gh_item.get("description", ""),
-                             us_desc=us_item.get("description", "")):
-            continue
-
-        # Score from titles only
-        title_score = fuzzy_score(gh_item["title"], us_item["title"])
-
-        # Score from title + description: when US title is vague but description has
-        # the real specs, this recovers matches that title-only scoring would miss.
-        us_desc = us_item.get("description", "")
-        desc_spec_terms = _extract_spec_terms(us_desc)
-        if desc_spec_terms:
-            # Build enriched US text: title + extracted spec terms from description
-            enriched_us = us_item["title"] + " " + desc_spec_terms
-            desc_score = fuzzy_score(gh_item["title"], enriched_us)
-        else:
-            desc_score = title_score
-
-        # Use the better of the two scores
-        score = max(title_score, desc_score)
-
-        # Vague-title penalty: if the US title has far fewer meaningful tokens than GH
-        # AND the description doesn't compensate, penalize.
-        gh_tokens = tokenize(gh_item["title"])
-        us_tokens = tokenize(us_item["title"])
-        if len(us_tokens) > 0 and len(gh_tokens) > 0:
-            token_ratio = len(us_tokens) / len(gh_tokens)
-            if token_ratio < 0.50:
-                # Check if description contains GH-title tokens that are missing from US title.
-                # If the description fills in the gaps, the match is more trustworthy.
-                gh_set = set(gh_tokens)
-                us_set = set(us_tokens)
-                missing_from_title = gh_set - us_set
-                if missing_from_title and desc_spec_terms:
-                    desc_tokens = set(normalize_title(desc_spec_terms).split())
-                    recovered = missing_from_title & desc_tokens
-                    recovery_ratio = len(recovered) / len(missing_from_title) if missing_from_title else 0
-                else:
-                    recovery_ratio = 0.0
-
-                if recovery_ratio >= 0.50:
-                    # Description recovered ≥50% of missing spec tokens — mild penalty
-                    score = max(0, score - 8)
-                else:
-                    # Description didn't help — title is genuinely vague
-                    score = max(0, score - 25)
-
-        # Year proximity bonus/penalty.
-        # Prefers exact-year matches when multiple candidates pass the hard filter.
-        # This matters when a GH 2024 listing could match a 2023 or 2022 US listing.
-        us_year = extract_year(us_item["title"])
-        if gh_year and us_year and gh_year >= MODERN_YEAR_MIN and us_year >= MODERN_YEAR_MIN:
-            year_diff = abs(gh_year - us_year)
-            if year_diff == 0:
-                score = min(100, score + 4)   # exact year match — strongest signal
-            elif year_diff == 1:
-                score = min(100, score + 1)   # 1-year gap — minor bonus
-            else:
-                score = max(0, score - 3)     # 2-year gap — slight penalty (still passes hard filter)
-
-        if score > best_score:
+        score = _score_candidate(gh_item, us_item, gh_year)
+        if score is not None and score > best_score:
             best_score = score
             best_item = us_item
 
     return best_item, best_score
+
+
+def find_all_matches(gh_item: Dict, us_items: List[Dict],
+                     min_score: int = 75) -> List[Tuple[Dict, int]]:
+    """Return ALL qualifying US matches for a GH guitar, sorted by price (cheapest first).
+
+    This ensures opportunities from non-Reverb stores surface even when
+    Reverb has a higher fuzzy score for the same model. Each store's cheapest
+    qualifying match is returned (one per source).
+    """
+    gh_year = extract_year(gh_item["title"])
+    # Collect best match per source
+    best_per_source: Dict[str, Tuple[Dict, int]] = {}
+
+    for us_item in us_items:
+        score = _score_candidate(gh_item, us_item, gh_year)
+        if score is None or score < min_score:
+            continue
+        source = us_item.get("source", "unknown")
+        existing = best_per_source.get(source)
+        if existing is None:
+            best_per_source[source] = (us_item, score)
+        else:
+            # Prefer cheaper price within same source; if same price, higher score
+            ex_item, ex_score = existing
+            if (us_item["price_usd"] < ex_item["price_usd"] or
+                    (us_item["price_usd"] == ex_item["price_usd"] and score > ex_score)):
+                best_per_source[source] = (us_item, score)
+
+    # Sort by price ascending (cheapest first = best arbitrage)
+    results = sorted(best_per_source.values(), key=lambda x: x[0]["price_usd"])
+    return results

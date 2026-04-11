@@ -26,7 +26,7 @@ from scrapers import (
     scrape_reverb_query,
     fetch_reverb_sold_avg,
 )
-from matching import find_best_match, build_reverb_sold_query, has_red_flags
+from matching import find_best_match, find_all_matches, build_reverb_sold_query, has_red_flags
 from pricing import calculate_landed_cost, calculate_net_margin, is_opportunity, estimate_sell_mxn
 from catalog import (
     load_sold_catalog,
@@ -40,6 +40,9 @@ from catalog import (
 from price_history import PriceHistory
 from deal_score import compute_deal_score, verdict_emoji, VERDICT_BUY, VERDICT_REVIEW
 from notifier import send_telegram_message, send_telegram_photo
+# AI review and self-learning optimizer disabled — manual validation preferred
+# from ai_reviewer import review_opportunities, format_ai_reviews
+# from optimizer import apply_tuning_to_deal_score, optimize_from_report, load_tuning
 
 warnings.filterwarnings("ignore")
 
@@ -96,6 +99,27 @@ def fmt_source(source: str) -> str:
     return SOURCE_LABELS.get(source, source.capitalize())
 
 
+# ── Quality gates ─────────────────────────────────────────────────────────────
+# Hard requirements that must pass for a deal to be shown at all.
+
+MIN_SELL_RATE        = 0.30   # GH must have sold ≥30% of this model historically
+MIN_MATCH_BUY_NOW   = 88     # fuzzy match must be ≥88 for BUY NOW verdict
+MIN_LIQ_SOLD_COUNT  = 2      # need at least 2 historical sales to trust liquidity
+
+
+def passes_liquidity_gate(liq: dict | None, proactive: bool = False) -> bool:
+    """Return False if this model has proven LOW demand at GH — don't show it."""
+    if not liq:
+        # No liquidity data at all: for proactive, this is too risky. For reactive
+        # (GH actively selling it), allow through with neutral score.
+        return not proactive
+    if liq.get("sell_rate", 0) < MIN_SELL_RATE:
+        return False
+    if liq.get("count_sold", 0) < MIN_LIQ_SOLD_COUNT:
+        return False
+    return True
+
+
 def on_sale_tag(item: dict) -> str:
     if item.get("on_sale") and item.get("discount_pct", 0) > 0:
         return f"[ON SALE -{item['discount_pct']:.0f}%]"
@@ -136,6 +160,10 @@ def _card(i: int, item: dict, full: bool = True) -> str:
     all_orig_str = (
         "   ⚠ BENCHMARK 'ALL ORIGINAL' — verificar originalidad del listing US\n"
         if _gh_all_orig and not _us_all_orig else ""
+    )
+    capped_str = (
+        "   ⚠ BENCHMARK AJUSTADO — precio GH muy arriba del mercado US, margen recalculado con Reverb\n"
+        if item.get("benchmark_capped") else ""
     )
 
     reverb_avg = item.get("reverb_sold_avg_usd")
@@ -203,6 +231,7 @@ def _card(i: int, item: dict, full: bool = True) -> str:
         f"   Costo aterrizaje: ${item['landed_cost_usd']:,.0f} USD\n"
         f"   Benchmark: {benchmark_label(item)}\n"
         f"{all_orig_str}"
+        f"{capped_str}"
         f"{sell_mxn_str}"
         f"{reverb_str}"
         f"{liq_str}"
@@ -363,6 +392,21 @@ def evaluate_match(
         net_after_ml  = (benchmark_usd * (1 - ML_COMMISSION) - landed_cost) / landed_cost if landed_cost > 0 else -1.0
         opportunity   = net_profit > 0 and margin >= min_margin
 
+    # ── Reverb divergence cap ────────────────────────────────────────────────
+    # If Reverb sold avg is known and significantly lower than GH benchmark,
+    # the GH price is likely inflated (GH charges MX premium that US market
+    # doesn't support). Cap the effective benchmark to avoid phantom margins.
+    benchmark_capped = False
+    if reverb_avg and benchmark_usd and reverb_avg < benchmark_usd * 0.70:
+        capped = reverb_avg * 1.15
+        if capped < benchmark_usd:
+            benchmark_usd    = capped
+            benchmark_capped = True
+            net_profit  = benchmark_usd - landed_cost
+            margin      = net_profit / landed_cost if landed_cost > 0 else -1.0
+            net_after_ml = (benchmark_usd * (1 - ML_COMMISSION) - landed_cost) / landed_cost if landed_cost > 0 else -1.0
+            opportunity = net_profit > 0 and margin >= min_margin
+
     # Days on market from price history DB
     us_url = us_item["url"]
     days_on_market = ph.get_days_on_market(us_url) if ph else None
@@ -403,6 +447,7 @@ def evaluate_match(
         "proactive":           proactive,
         "days_on_market":      days_on_market,
         "had_price_drop":      had_price_drop,
+        "benchmark_capped":    benchmark_capped,
     }
 
 
@@ -561,60 +606,79 @@ def main() -> None:
     for gh_item in gh_items:
         if _unique_re.search(gh_item["title"]):
             continue
-        best_match, score = find_best_match(gh_item, us_items)
-        if not best_match:
-            continue
-        if best_match["url"] in seen_us_urls:
+        all_matches = find_all_matches(gh_item, us_items, min_score=min_match_score)
+        if not all_matches:
             continue
 
-        result = evaluate_match(
-            gh_title        = gh_item["title"],
-            gh_url          = gh_item["url"],
-            gh_price_mxn    = gh_item["price_mxn"],
-            us_item         = best_match,
-            score           = score,
-            usd_mxn         = usd_mxn,
-            logistics_usd   = logistics_usd,
-            min_margin      = min_margin,
-            min_match_score = min_match_score,
-            price_ratio_min = price_ratio_min,
-            price_ratio_max = price_ratio_max,
-            sold_catalog    = sold_catalog,
-            reverb_sold_cache = reverb_sold_cache,
-            gh_reverb_shop  = gh_reverb_shop,
-            proactive       = False,
-            drop_urls       = drop_urls,
-            ph              = ph,
-        )
-        if result:
-            seen_us_urls.add(best_match["url"])
-            liq = get_liquidity(result["gh_title"], liquidity_scores)
-            result["liquidity"] = liq
-            ds = compute_deal_score(
-                margin         = result["margin"],
-                match_score    = result["score"],
-                liquidity      = liq,
-                on_sale        = result["on_sale"],
-                had_price_drop = result["had_price_drop"],
-                days_on_market = result["days_on_market"],
-                source         = result["us_source"],
-                condition      = result.get("us_condition", ""),
-                aging_tier     = best_match.get("aging_tier"),
-                flame_top      = best_match.get("flame_top"),
-                has_brazilian  = best_match.get("has_brazilian", False),
-                has_mods       = best_match.get("has_mods", False),
-                no_coa         = best_match.get("no_coa", False),
+        for us_match, score in all_matches:
+            if us_match["url"] in seen_us_urls:
+                continue
+
+            result = evaluate_match(
+                gh_title        = gh_item["title"],
+                gh_url          = gh_item["url"],
+                gh_price_mxn    = gh_item["price_mxn"],
+                us_item         = us_match,
+                score           = score,
+                usd_mxn         = usd_mxn,
+                logistics_usd   = logistics_usd,
+                min_margin      = min_margin,
+                min_match_score = min_match_score,
+                price_ratio_min = price_ratio_min,
+                price_ratio_max = price_ratio_max,
+                sold_catalog    = sold_catalog,
+                reverb_sold_cache = reverb_sold_cache,
+                gh_reverb_shop  = gh_reverb_shop,
+                proactive       = False,
+                drop_urls       = drop_urls,
+                ph              = ph,
             )
-            result["deal_score"] = ds
-            ranked_matches.append(result)
-            verdict = ds["verdict"]
-            if verdict == VERDICT_BUY:
-                buy_now.append(result)
-                opportunities.append(result)
-            elif result["opportunity"]:
-                opportunities.append(result)
-            elif result["margin"] >= 0.20:
-                near_misses.append(result)
+            if result:
+                seen_us_urls.add(us_match["url"])
+                liq = get_liquidity(result["gh_title"], liquidity_scores)
+                result["liquidity"] = liq
+
+                # Liquidity gate: skip if proven low demand
+                if not passes_liquidity_gate(liq, proactive=False):
+                    continue
+
+                ds = compute_deal_score(
+                    margin             = result["margin"],
+                    match_score        = result["score"],
+                    liquidity          = liq,
+                    on_sale            = result["on_sale"],
+                    had_price_drop     = result["had_price_drop"],
+                    days_on_market     = result["days_on_market"],
+                    source             = result["us_source"],
+                    condition          = result.get("us_condition", ""),
+                    aging_tier         = us_match.get("aging_tier"),
+                    flame_top          = us_match.get("flame_top"),
+                    has_brazilian      = us_match.get("has_brazilian", False),
+                    has_mods           = us_match.get("has_mods", False),
+                    no_coa             = us_match.get("no_coa", False),
+                    has_ohsc           = us_match.get("has_ohsc", False),
+                    is_weight_relieved = us_match.get("is_weight_relieved", False),
+                    offers_enabled     = us_match.get("offers_enabled", False),
+                    drop_velocity      = ph.get_drop_velocity(us_match.get("url", "")),
+                    benchmark_source   = result.get("benchmark_source", ""),
+                    benchmark_capped   = result.get("benchmark_capped", False),
+                )
+
+                # Match confidence gate: low match can never be BUY NOW
+                verdict = ds["verdict"]
+                if verdict == VERDICT_BUY and result["score"] < MIN_MATCH_BUY_NOW:
+                    ds["verdict"] = VERDICT_REVIEW
+                    verdict = VERDICT_REVIEW
+
+                result["deal_score"] = ds
+                ranked_matches.append(result)
+                if verdict == VERDICT_BUY:
+                    buy_now.append(result)
+                    opportunities.append(result)
+                elif result["opportunity"]:
+                    opportunities.append(result)
+                elif result["margin"] >= 0.20:
+                    near_misses.append(result)
 
     print(f"Reactive: {len(ranked_matches)} matches, {len(opportunities)} oportunidades")
 
@@ -660,62 +724,81 @@ def main() -> None:
                 continue
 
             synthetic_gh = {"title": title, "price_mxn": gh_price, "url": ""}
-            best_match, score = find_best_match(synthetic_gh, us_items)
-            if not best_match or best_match["url"] in seen_us_urls_fresh:
+            all_matches = find_all_matches(synthetic_gh, us_items, min_score=min_match_score)
+            if not all_matches:
                 continue
 
-            result = evaluate_match(
-                gh_title        = title,
-                gh_url          = post.get("url", ""),
-                gh_price_mxn    = 0,  # force Instagram benchmark lookup
-                us_item         = best_match,
-                score           = score,
-                usd_mxn         = usd_mxn,
-                logistics_usd   = logistics_usd,
-                min_margin      = fresh_min_margin,
-                min_match_score = min_match_score,
-                price_ratio_min = price_ratio_min,
-                price_ratio_max = price_ratio_max,
-                sold_catalog    = full_history,
-                reverb_sold_cache = reverb_sold_cache,
-                gh_reverb_shop  = gh_reverb_shop,
-                proactive       = True,
-                drop_urls       = drop_urls,
-                ph              = ph,
-            )
-            if result:
-                result["fresh"] = True
-                result["very_fresh"] = is_very_fresh
-                seen_us_urls_fresh.add(best_match["url"])
-                seen_us_urls.add(best_match["url"])
-                liq = get_liquidity(result["gh_title"], liquidity_scores)
-                result["liquidity"] = liq
-                ds = compute_deal_score(
-                    margin         = result["margin"],
-                    match_score    = result["score"],
-                    liquidity      = liq,
-                    on_sale        = result["on_sale"],
-                    had_price_drop = result["had_price_drop"],
-                    days_on_market = result["days_on_market"],
-                    source         = result["us_source"],
-                    condition      = result.get("us_condition", ""),
-                    aging_tier     = best_match.get("aging_tier"),
-                    flame_top      = best_match.get("flame_top"),
-                    has_brazilian  = best_match.get("has_brazilian", False),
-                    has_mods       = best_match.get("has_mods", False),
-                    no_coa         = best_match.get("no_coa", False),
-                    fresh_post     = is_very_fresh,
+            for us_match, score in all_matches:
+                if us_match["url"] in seen_us_urls_fresh:
+                    continue
+
+                result = evaluate_match(
+                    gh_title        = title,
+                    gh_url          = post.get("url", ""),
+                    gh_price_mxn    = 0,
+                    us_item         = us_match,
+                    score           = score,
+                    usd_mxn         = usd_mxn,
+                    logistics_usd   = logistics_usd,
+                    min_margin      = fresh_min_margin,
+                    min_match_score = min_match_score,
+                    price_ratio_min = price_ratio_min,
+                    price_ratio_max = price_ratio_max,
+                    sold_catalog    = full_history,
+                    reverb_sold_cache = reverb_sold_cache,
+                    gh_reverb_shop  = gh_reverb_shop,
+                    proactive       = True,
+                    drop_urls       = drop_urls,
+                    ph              = ph,
                 )
-                result["deal_score"] = ds
-                ranked_matches.append(result)
-                verdict = ds["verdict"]
-                if verdict == VERDICT_BUY:
-                    buy_now.append(result)
-                    opportunities.append(result)
-                elif result["opportunity"]:
-                    opportunities.append(result)
-                elif result["margin"] >= 0.20:
-                    near_misses.append(result)
+                if result:
+                    result["fresh"] = True
+                    result["very_fresh"] = is_very_fresh
+                    seen_us_urls_fresh.add(us_match["url"])
+                    seen_us_urls.add(us_match["url"])
+                    liq = get_liquidity(result["gh_title"], liquidity_scores)
+                    result["liquidity"] = liq
+
+                    if not passes_liquidity_gate(liq, proactive=True):
+                        continue
+
+                    ds = compute_deal_score(
+                        margin             = result["margin"],
+                        match_score        = result["score"],
+                        liquidity          = liq,
+                        on_sale            = result["on_sale"],
+                        had_price_drop     = result["had_price_drop"],
+                        days_on_market     = result["days_on_market"],
+                        source             = result["us_source"],
+                        condition          = result.get("us_condition", ""),
+                        aging_tier         = us_match.get("aging_tier"),
+                        flame_top          = us_match.get("flame_top"),
+                        has_brazilian      = us_match.get("has_brazilian", False),
+                        has_mods           = us_match.get("has_mods", False),
+                        no_coa             = us_match.get("no_coa", False),
+                        has_ohsc           = us_match.get("has_ohsc", False),
+                        is_weight_relieved = us_match.get("is_weight_relieved", False),
+                        offers_enabled     = us_match.get("offers_enabled", False),
+                        drop_velocity      = ph.get_drop_velocity(us_match.get("url", "")),
+                        fresh_post         = is_very_fresh,
+                        benchmark_source   = result.get("benchmark_source", ""),
+                        benchmark_capped   = result.get("benchmark_capped", False),
+                    )
+
+                    verdict = ds["verdict"]
+                    if verdict == VERDICT_BUY and result["score"] < MIN_MATCH_BUY_NOW:
+                        ds["verdict"] = VERDICT_REVIEW
+                        verdict = VERDICT_REVIEW
+
+                    result["deal_score"] = ds
+                    ranked_matches.append(result)
+                    if verdict == VERDICT_BUY:
+                        buy_now.append(result)
+                        opportunities.append(result)
+                    elif result["opportunity"]:
+                        opportunities.append(result)
+                    elif result["margin"] >= 0.20:
+                        near_misses.append(result)
 
         fresh_matches = sum(1 for m in ranked_matches if m.get("fresh"))
         print(f"Fresh: {fresh_matches} matches from recent IG posts")
@@ -728,60 +811,78 @@ def main() -> None:
         seen_us_urls = {m["us_url"] for m in ranked_matches}
 
         for target in proactive_targets:
-            # Create a synthetic GH item from historical data
             gh_title = target["title"]
-            gh_price_mxn = target["avg_price_usd"] * usd_mxn  # historical avg as MXN proxy
+            gh_price_mxn = target["avg_price_usd"] * usd_mxn
 
-            # Find best US match for this target
             synthetic_gh = {"title": gh_title, "price_mxn": gh_price_mxn, "url": ""}
-            best_match, score = find_best_match(synthetic_gh, us_items)
-
-            if not best_match or best_match["url"] in seen_us_urls:
+            all_matches = find_all_matches(synthetic_gh, us_items, min_score=min_match_score)
+            if not all_matches:
                 continue
 
-            result = evaluate_match(
-                gh_title        = gh_title,
-                gh_url          = "",
-                gh_price_mxn    = 0,
-                us_item         = best_match,
-                score           = score,
-                usd_mxn         = usd_mxn,
-                logistics_usd   = logistics_usd,
-                min_margin      = min_margin,
-                min_match_score = min_match_score,
-                price_ratio_min = price_ratio_min,
-                price_ratio_max = price_ratio_max,
-                sold_catalog    = full_history,
-                reverb_sold_cache = reverb_sold_cache,
-                gh_reverb_shop  = gh_reverb_shop,
-                proactive       = True,
-                drop_urls       = drop_urls,
-                ph              = ph,
-            )
-            if result:
-                liq = get_liquidity(result["gh_title"], liquidity_scores)
-                result["liquidity"] = liq
-                ds = compute_deal_score(
-                    margin         = result["margin"],
-                    match_score    = result["score"],
-                    liquidity      = liq,
-                    on_sale        = result["on_sale"],
-                    had_price_drop = result["had_price_drop"],
-                    days_on_market = result["days_on_market"],
-                    source         = result["us_source"],
-                    aging_tier     = best_match.get("aging_tier"),
-                    flame_top      = best_match.get("flame_top"),
-                    has_brazilian  = best_match.get("has_brazilian", False),
-                    has_mods       = best_match.get("has_mods", False),
-                    no_coa         = best_match.get("no_coa", False),
+            for us_match, score in all_matches:
+                if us_match["url"] in seen_us_urls:
+                    continue
+
+                result = evaluate_match(
+                    gh_title        = gh_title,
+                    gh_url          = "",
+                    gh_price_mxn    = 0,
+                    us_item         = us_match,
+                    score           = score,
+                    usd_mxn         = usd_mxn,
+                    logistics_usd   = logistics_usd,
+                    min_margin      = min_margin,
+                    min_match_score = min_match_score,
+                    price_ratio_min = price_ratio_min,
+                    price_ratio_max = price_ratio_max,
+                    sold_catalog    = full_history,
+                    reverb_sold_cache = reverb_sold_cache,
+                    gh_reverb_shop  = gh_reverb_shop,
+                    proactive       = True,
+                    drop_urls       = drop_urls,
+                    ph              = ph,
                 )
-                result["deal_score"] = ds
-                seen_us_urls.add(best_match["url"])
-                ranked_matches.append(result)
-                if result["opportunity"]:
-                    opportunities.append(result)
-                elif result["margin"] >= 0.20:
-                    near_misses.append(result)
+                if result:
+                    liq = get_liquidity(result["gh_title"], liquidity_scores)
+                    result["liquidity"] = liq
+
+                    if not passes_liquidity_gate(liq, proactive=True):
+                        continue
+
+                    ds = compute_deal_score(
+                        margin             = result["margin"],
+                        match_score        = result["score"],
+                        liquidity          = liq,
+                        on_sale            = result["on_sale"],
+                        had_price_drop     = result["had_price_drop"],
+                        days_on_market     = result["days_on_market"],
+                        source             = result["us_source"],
+                        condition          = result.get("us_condition", ""),
+                        aging_tier         = us_match.get("aging_tier"),
+                        flame_top          = us_match.get("flame_top"),
+                        has_brazilian      = us_match.get("has_brazilian", False),
+                        has_mods           = us_match.get("has_mods", False),
+                        no_coa             = us_match.get("no_coa", False),
+                        has_ohsc           = us_match.get("has_ohsc", False),
+                        is_weight_relieved = us_match.get("is_weight_relieved", False),
+                        offers_enabled     = us_match.get("offers_enabled", False),
+                        drop_velocity      = ph.get_drop_velocity(us_match.get("url", "")),
+                        benchmark_source   = result.get("benchmark_source", ""),
+                        benchmark_capped   = result.get("benchmark_capped", False),
+                    )
+
+                    verdict = ds["verdict"]
+                    if verdict == VERDICT_BUY and result["score"] < MIN_MATCH_BUY_NOW:
+                        ds["verdict"] = VERDICT_REVIEW
+                        verdict = VERDICT_REVIEW
+
+                    result["deal_score"] = ds
+                    seen_us_urls.add(us_match["url"])
+                    ranked_matches.append(result)
+                    if result["opportunity"]:
+                        opportunities.append(result)
+                    elif result["margin"] >= 0.20:
+                        near_misses.append(result)
 
         print(f"Proactive added: {sum(1 for m in ranked_matches if m.get('proactive'))} matches")
 

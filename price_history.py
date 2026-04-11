@@ -227,6 +227,37 @@ class PriceHistory:
             "max":   round(row["max_p"], 2),
         }
 
+    def get_drop_velocity(self, url: str, days: int = 30) -> Optional[float]:
+        """
+        Return the price drop rate for a listing in drops-per-week.
+
+        Counts how many times the price dropped significantly (>=5%) within
+        the last N days, normalized to a weekly rate.
+
+        A velocity of 1.0 = dropped once per week = motivated seller.
+        A velocity of 2.0 = dropped twice per week = very motivated.
+
+        Returns None if fewer than 2 observations (can't compute velocity).
+        """
+        history = self.get_price_history(url, days=days)
+        if len(history) < 2:
+            return None
+
+        drop_count = 0
+        for i in range(1, len(history)):
+            prev_price = history[i - 1]["price_usd"]
+            curr_price = history[i]["price_usd"]
+            if prev_price > 0 and curr_price < prev_price:
+                drop_pct = (prev_price - curr_price) / prev_price * 100
+                if drop_pct >= PRICE_DROP_ALERT_PCT:
+                    drop_count += 1
+
+        if drop_count == 0:
+            return None
+
+        weeks = days / 7.0
+        return round(drop_count / weeks, 2)
+
     def get_recent_drops(self, hours: int = 24) -> list[dict]:
         """Return all price drop alerts from the last N hours."""
         cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()

@@ -119,18 +119,34 @@ def check_fx_rate() -> None:
 
         if abs(change_pct) >= ALERT_THRESHOLD_PCT:
             direction = "SUBE" if change_pct > 0 else "BAJA"
+            if change_pct < 0:
+                # Peso appreciates = USD buys less MXN = your landed cost in MXN terms is cheaper
+                # = all your margins improve simultaneously = buy window
+                example_guitar_mxn = 55000  # LP Standard benchmark MXN
+                old_usd_cost = example_guitar_mxn / prev_rate
+                new_usd_cost = example_guitar_mxn / current_rate
+                margin_boost = (old_usd_cost - new_usd_cost) / old_usd_cost * 100
+                context = (
+                    f"El peso se APRECIA — VENTANA DE COMPRA ABIERTA.\n"
+                    f"Tu landed cost baja en MXN equivalente.\n"
+                    f"Ejemplo LP Standard ($55,000 MXN benchmark):\n"
+                    f"  Antes: USD {old_usd_cost:,.0f} landed\n"
+                    f"  Ahora: USD {new_usd_cost:,.0f} landed\n"
+                    f"  Mejora de margen: +{margin_boost:.1f}%\n\n"
+                    f"Corre main.py ahora — los margenes mejoraron para todas las guitarras."
+                )
+            else:
+                context = (
+                    f"El peso se DEPRECIA — tus costos suben en MXN.\n"
+                    f"Revisa margenes antes de comprar.\n"
+                    f"Espera a que el tipo de cambio se estabilice."
+                )
             msg = (
                 f"ALERTA FX - USD/MXN\n\n"
                 f"Tasa {direction} {abs(change_pct):.2f}%\n"
-                f"Ayer: ${prev_rate:.2f}\n"
-                f"Hoy:  ${current_rate:.2f}\n\n"
-                + (
-                    "El peso se DEPRECIA — tus costos de compra en USD representan\n"
-                    "mas MXN. Revisa margenes antes de comprar."
-                    if change_pct > 0 else
-                    "El peso se APRECIA — mayor poder de compra en USD.\n"
-                    "Buen momento para buscar oportunidades."
-                )
+                f"Ayer: ${prev_rate:.4f}\n"
+                f"Hoy:  ${current_rate:.4f}\n\n"
+                + context
             )
             _telegram(msg)
             print(f"  ALERTA enviada: {direction} {abs(change_pct):.2f}%")

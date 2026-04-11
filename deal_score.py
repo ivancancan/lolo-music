@@ -91,7 +91,7 @@ VERDICT_BUY    = "BUY NOW"
 VERDICT_REVIEW = "REVIEW"
 VERDICT_PASS   = "PASS"
 
-BUY_THRESHOLD    = 75
+BUY_THRESHOLD    = 78
 REVIEW_THRESHOLD = 50
 
 
@@ -162,6 +162,8 @@ def _score_spec(
     has_brazilian: bool = False,
     has_mods: bool = False,
     no_coa: bool = False,
+    has_ohsc: bool = False,
+    is_weight_relieved: bool = False,
 ) -> float:
     """
     Spec bonus/penalty based on physical attributes that drive MX resale price.
@@ -171,14 +173,18 @@ def _score_spec(
       Heavy Aged / Ultra Heavy Aged: +5 (most desirable Murphy Lab tier)
       Light/Ultra Light Aged: +2        (above VOS baseline)
       Flame/figured top: +3             (visual premium, sells faster)
+      OHSC included: +4                 (original case adds $200-400 MX value)
 
     Penalties (guitar is worth less than its model average):
       Modifications (pickups replaced, refret, etc.): -8
         Collectors pay for originality — mods destroy value in this segment.
       Missing/No COA: -10
         Without the certificate, a Custom Shop loses 15-20% of value in MX.
+      Weight-relieved / chambered body: -6
+        Gibson collectors strongly prefer fully solid bodies. 2012-2018 LPs
+        with weight relief sell 10-20% below solid-body equivalents in MX.
 
-    Returns a value typically between -15 and +10.
+    Returns a value typically between -18 and +14.
     Total deal score is still capped at 0-100 after this is applied.
     """
     score = 0.0
@@ -199,6 +205,10 @@ def _score_spec(
     if has_brazilian:
         score += 8
 
+    # Original case adds significant value in MX (shipping protection + collectibility)
+    if has_ohsc:
+        score += 4
+
     # Modification penalty — destroys collectible value
     if has_mods:
         score -= 8
@@ -206,6 +216,10 @@ def _score_spec(
     # Missing COA penalty — 15-20% value hit in MX collector market
     if no_coa:
         score -= 10
+
+    # Weight-relieved body penalty — Gibson collectors strongly prefer solid mahogany
+    if is_weight_relieved:
+        score -= 6
 
     return score
 
@@ -222,12 +236,18 @@ def compute_deal_score(
     source: str = "reverb",
     condition: str = "",
     # Spec attributes — affect MX resale value beyond the base model price
-    aging_tier: Optional[int] = None,   # 0-5 from detect_aging_tier()
-    flame_top: Optional[str] = None,    # 'figured', 'plain', or None
-    has_brazilian: bool = False,        # Brazilian rosewood fretboard
-    has_mods: bool = False,             # pickups replaced, refret, hardware swap
-    no_coa: bool = False,               # certificate of authenticity missing
-    fresh_post: bool = False,           # GH posted this guitar < 48hrs ago
+    aging_tier: Optional[int] = None,       # 0-5 from detect_aging_tier()
+    flame_top: Optional[str] = None,        # 'figured', 'plain', or None
+    has_brazilian: bool = False,            # Brazilian rosewood fretboard
+    has_mods: bool = False,                 # pickups replaced, refret, hardware swap
+    no_coa: bool = False,                   # certificate of authenticity missing
+    has_ohsc: bool = False,                 # original hard-shell case included
+    is_weight_relieved: bool = False,       # chambered/weight-relieved body
+    fresh_post: bool = False,               # GH posted this guitar < 48hrs ago
+    offers_enabled: bool = False,           # Reverb "offers accepted" — seller open to negotiate
+    drop_velocity: Optional[float] = None,  # price drops per week (from price_history)
+    benchmark_source: str = "",             # "gh_listing" or "instagram_sold"
+    benchmark_capped: bool = False,         # True if benchmark was capped by Reverb divergence
 ) -> dict:
     """
     Compute a 0-100 deal score and return a full breakdown.
@@ -262,13 +282,35 @@ def compute_deal_score(
     s_sale    = _score_sale(on_sale, had_price_drop)
     s_dom     = _score_days_on_market(days_on_market)
     s_source  = _score_source(source)
-    s_spec    = _score_spec(aging_tier, flame_top, has_brazilian, has_mods, no_coa)
+    s_spec    = _score_spec(aging_tier, flame_top, has_brazilian, has_mods, no_coa,
+                            has_ohsc, is_weight_relieved)
 
     # Fresh post bonus: GH posted this guitar < 48hrs ago — benchmark is very
     # reliable and there's a real-time arbitrage window. +7 pts.
     s_fresh = 7.0 if fresh_post else 0.0
 
-    total = int(round(s_margin + s_liq + s_match + s_sale + s_dom + s_source + s_spec + s_fresh))
+    # "Offers accepted" bonus: seller signals willingness to negotiate.
+    # Reverb listings with this flag typically accept 8-12% below list.
+    # +6 pts — reflects improved effective margin through negotiation.
+    s_offers = 6.0 if offers_enabled else 0.0
+
+    # Price drop velocity bonus: a guitar that dropped multiple times in weeks
+    # signals a motivated seller and improving margin. +3 pts per drop/week, max +6.
+    s_velocity = 0.0
+    if drop_velocity and drop_velocity > 0:
+        s_velocity = min(drop_velocity * 3.0, 6.0)
+
+    # Benchmark confidence penalty: Instagram-only benchmarks are less reliable
+    # than active GH listings. If benchmark was capped due to Reverb divergence,
+    # apply additional penalty — the margin is already reduced but confidence is low.
+    s_bench_penalty = 0.0
+    if benchmark_capped:
+        s_bench_penalty = -8.0  # significant penalty for unreliable benchmark
+    elif benchmark_source == "instagram_sold":
+        s_bench_penalty = -3.0  # slight penalty — IG prices can be stale
+
+    total = int(round(s_margin + s_liq + s_match + s_sale + s_dom + s_source + s_spec
+                      + s_fresh + s_offers + s_velocity + s_bench_penalty))
     total = max(0, min(100, total))
 
     # Condition penalty: deduct points for below-excellent condition
@@ -311,6 +353,16 @@ def compute_deal_score(
         flags.append("SIN COA — valor reducido 15-20%")
     if has_mods:
         flags.append("MODIFICADA — coleccionistas pagan menos")
+    if is_weight_relieved:
+        flags.append("WEIGHT RELIEF — cuerpo aligerado, -10-20% con coleccionistas")
+    if has_ohsc:
+        flags.append("OHSC incluido (+valor en MX)")
+    if offers_enabled:
+        flags.append("ACEPTA OFERTAS — negocia 8-12% abajo del precio lista")
+    if drop_velocity and drop_velocity >= 1.0:
+        flags.append(f"BAJA DE PRECIO RAPIDO — {drop_velocity:.1f}x por semana (vendedor desesperado)")
+    if benchmark_capped:
+        flags.append("BENCHMARK AJUSTADO — Reverb indica precio GH inflado")
     if fresh_post:
         flags.append("FRESH FROM GH — publicado < 48hrs")
     if condition:
@@ -330,6 +382,9 @@ def compute_deal_score(
             "source":    s_source,
             "spec":      s_spec,
             "fresh":     s_fresh,
+            "offers":    s_offers,
+            "velocity":  s_velocity,
+            "bench_penalty": s_bench_penalty,
         },
         "flags": flags,
     }
