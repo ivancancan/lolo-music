@@ -32,6 +32,7 @@ ELECTRIC_ONLY_MODELS = {
     "les paul", "sg", "flying v", "explorer", "firebird",
     "es-335", "es335", "es-339", "es339", "es-330", "es330",
     "es-345", "es345", "es-355", "es355",
+    "t3", "t5",   # Taylor electric series — semi-hollow/hollow electrics, ≠ any acoustic Taylor
 }
 
 
@@ -179,6 +180,14 @@ MODEL_KEYWORDS = {
     "modern plus",      # Suhr Modern Plus — distinct from Modern, Classic S, Classic T
     "modern",           # Suhr Modern — base model, ≠ Modern Plus (different electronics)
     "alt",              # Suhr Alt (T, S) — alternative series
+    # Rickenbacker models — each is a distinct body/spec/price tier ($400-1,900 gaps)
+    "rickenbacker 660",  # solid body, T-style — most expensive (~$3,500)
+    "rickenbacker 620",  # semi-hollow, mahogany body (~$2,800)
+    "rickenbacker 360",  # semi-hollow, deluxe binding/hardware (~$2,200) — also 360/12
+    "rickenbacker 330",  # semi-hollow, standard spec (~$1,600)
+    "rickenbacker 325",  # short-scale, Lennon model — collector's item
+    "rickenbacker 4003", # bass — completely separate category from 6-string models
+    "rickenbacker 4001", # vintage bass
 }
 
 SUBMODEL_KEYWORDS = {
@@ -236,6 +245,7 @@ BRAZILIAN_KEYWORDS = {"brazilian", "brazilian rosewood", "brw"}
 # Flame/figured tops sell faster at higher prices vs plain tops.
 FIGURED_TOP_KEYWORDS = {
     "flame top", "flame maple", "highly figured", "figured maple",
+    "figured",   # catches "Figured Blood Moon", "Figured Top" without "Maple"
     "4a", "5a", "aaa", "aaaa",   # grade notation
 }
 PLAIN_TOP_KEYWORDS = {"plain top", "plain maple"}
@@ -647,7 +657,7 @@ def is_hard_match(gh_title: str, us_title: str,
     # If GH explicitly lists a quilt/figured top and US doesn't mention it, don't match.
     # Note: only applies when GH (the benchmark) has the premium top — we don't reject when
     # only the US side declares it (buying premium, benchmarking standard = conservative).
-    _quilt_kw = {"quilt top", "quilted", "10 top", "10top"}
+    _quilt_kw = {"quilt top", "quilted", "10 top", "10top", "figured"}
     gh_quilt = any(kw in normalize_title(gh_effective) for kw in _quilt_kw)
     us_quilt = any(kw in normalize_title(us_effective) for kw in _quilt_kw)
     if gh_quilt and not us_quilt:
@@ -815,10 +825,12 @@ def is_hard_match(gh_title: str, us_title: str,
             return False
         if (us_year <= VINTAGE_YEAR_MAX and gh_year >= MODERN_YEAR_MIN):
             return False
-        # Modern vs modern: max 2-year gap.
-        # Same model shifts spec/price more than 2 years apart (e.g., 2019 vs 2024 Les Paul).
+        # Modern vs modern: max 5-year gap.
+        # Used inventory circulates 3-5 years after manufacture. A 2020 LP Standard in
+        # excellent condition vs a 2024 benchmark is a real opportunity (~$200-400 diff),
+        # not a mismatch. Deal score penalizes year gap; this is not a hard reject.
         if gh_year >= MODERN_YEAR_MIN and us_year >= MODERN_YEAR_MIN:
-            if abs(gh_year - us_year) > 2:
+            if abs(gh_year - us_year) > 5:
                 return False
         # Vintage vs vintage (reissue model years like 1954, 1959): max 4-year gap.
         # |1959 - 1954| = 5 → different reissue models (R9 vs Goldtop) → reject.
@@ -952,6 +964,27 @@ def is_hard_match(gh_title: str, us_title: str,
         gh_config = {c for c in _PICKUP_CONFIGS if c in normalize_title(gh_effective)}
         us_config = {c for c in _PICKUP_CONFIGS if c in normalize_title(us_effective)}
         if gh_config and us_config and gh_config != us_config:
+            return False
+
+    # Semi-hollow variant check: guitars that exist in both solid and semi-hollow versions
+    # are distinct products with different construction, tone, and price (~$300-500 gap).
+    # PRS CE-24 Semi-Hollow ≠ PRS CE-24, Gibson ES-335 Thinline ≠ ES-335, etc.
+    # Bidirectional: benchmark must match what we're buying.
+    _SEMI_HOLLOW_KW = {"semi-hollow", "semi hollow", "semihollow", "thinline"}
+    gh_semi = any(kw in normalize_title(gh_effective) for kw in _SEMI_HOLLOW_KW)
+    us_semi = any(kw in normalize_title(us_effective) for kw in _SEMI_HOLLOW_KW)
+    if gh_semi != us_semi:
+        return False
+
+    # PRS S2 vs Core check: S2 line (~$900-1,500 USD) uses different body construction
+    # and cheaper components than Core (~$2,500-4,000 USD). Same model name (Custom 24,
+    # McCarty) but "S2" prefix makes it a completely different product tier.
+    # Without this check, a PRS S2 Custom 24 would match a PRS Custom 24 Core benchmark
+    # and produce a false 40%+ margin — potential $2,000+ loss if purchased.
+    if gh_brand == "prs" and us_brand == "prs":
+        gh_s2 = bool(re.search(r'\bs2\b', normalize_title(gh_effective)))
+        us_s2 = bool(re.search(r'\bs2\b', normalize_title(us_effective)))
+        if gh_s2 != us_s2:
             return False
 
     # Gretsch series tier check: G5xxx (Electromatic, ~$500-800) ≠ G6xxx (Professional,

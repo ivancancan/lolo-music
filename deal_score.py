@@ -285,9 +285,10 @@ def compute_deal_score(
     s_spec    = _score_spec(aging_tier, flame_top, has_brazilian, has_mods, no_coa,
                             has_ohsc, is_weight_relieved)
 
-    # Fresh post bonus: GH posted this guitar < 48hrs ago — benchmark is very
-    # reliable and there's a real-time arbitrage window. +7 pts.
-    s_fresh = 7.0 if fresh_post else 0.0
+    # Fresh post bonus: GH posted this guitar < 48hrs ago — benchmark is current.
+    # Reduced from 7 to 3 pts: GH takes weeks to sell, so recency of post doesn't
+    # create a real arbitrage window. Benchmark reliability comes from sales history.
+    s_fresh = 3.0 if fresh_post else 0.0
 
     # "Offers accepted" bonus: seller signals willingness to negotiate.
     # Reverb listings with this flag typically accept 8-12% below list.
