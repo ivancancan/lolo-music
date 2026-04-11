@@ -389,7 +389,7 @@ def extract_brand(title: str) -> Optional[str]:
         "epiphone",
         "gibson", "fender", "prs", "suhr", "music man", "ernie ball",
         "gretsch", "ibanez", "charvel", "jackson", "esp", "collings",
-        "knaggs", "tom anderson", "taylor", "rickenbacker",
+        "knaggs", "tom anderson", "martin", "taylor", "rickenbacker",
     ]:
         if brand in text:
             return brand
@@ -952,6 +952,81 @@ def is_hard_match(gh_title: str, us_title: str,
         gh_config = {c for c in _PICKUP_CONFIGS if c in normalize_title(gh_effective)}
         us_config = {c for c in _PICKUP_CONFIGS if c in normalize_title(us_effective)}
         if gh_config and us_config and gh_config != us_config:
+            return False
+
+    # Gretsch series tier check: G5xxx (Electromatic, ~$500-800) ≠ G6xxx (Professional,
+    # $2,000-4,000+). "Rancher" = acoustic → never match against an electric Gretsch.
+    if gh_brand == "gretsch" and us_brand == "gretsch":
+        def _gretsch_series(t: str) -> Optional[int]:
+            m = re.search(r'\bG(\d)', t, re.I)
+            return int(m.group(1)) if m else None
+        gh_rancher = "rancher" in normalize_title(gh_effective)
+        us_rancher = "rancher" in normalize_title(us_effective)
+        if gh_rancher != us_rancher:
+            return False
+        gs_a = _gretsch_series(gh_effective)
+        gs_b = _gretsch_series(us_effective)
+        if gs_a is not None and gs_b is not None and gs_a != gs_b:
+            return False
+
+    # Fender generation filter: Ultra ≠ Professional ≠ Performer ≠ Player ≠ Standard.
+    # The existing upgrade check (Player II / Pro II vs base) only catches "II/Plus" suffixes.
+    # This check catches cross-generation mismatches (Ultra vs Professional, etc.).
+    # Each generation is a distinct product line with different specs and $200-600 gap.
+    _FENDER_GENERATIONS = [
+        ("ultra",),
+        ("professional ii", "pro ii"),
+        ("professional", "pro"),
+        ("performer",),
+        ("player plus",),
+        ("player ii",),
+        ("player",),
+        ("american special",),
+        ("american standard",),
+        ("standard",),
+    ]
+    if gh_brand == "fender" and us_brand == "fender":
+        def _fender_gen(t: str) -> Optional[str]:
+            tn = normalize_title(t)
+            for gen_group in _FENDER_GENERATIONS:
+                if any(g in tn for g in gen_group):
+                    return gen_group[0]
+            return None
+        gh_gen = _fender_gen(gh_effective)
+        us_gen = _fender_gen(us_effective)
+        if gh_gen and us_gen and gh_gen != us_gen:
+            return False
+
+    # Gibson CS reissue code filter: R7 (1957), R8 (1958), R9 (1959), R0 (1960) are
+    # distinct Custom Shop models with $1,000-3,000 price gaps between them.
+    # The existing reissue year check uses the raw year; this catches the shorthand codes.
+    _GIBSON_REISSUE_CODES: Dict[str, int] = {"r7": 1957, "r8": 1958, "r9": 1959, "r0": 1960}
+    if gh_brand == "gibson" and us_brand == "gibson":
+        def _gibson_reissue_code(t: str) -> Optional[int]:
+            tn = normalize_title(t)
+            for code, year in _GIBSON_REISSUE_CODES.items():
+                if re.search(r'\b' + code + r'\b', tn):
+                    return year
+            return None
+        gh_rc = _gibson_reissue_code(gh_effective)
+        us_rc = _gibson_reissue_code(us_effective)
+        if gh_rc and us_rc and abs(gh_rc - us_rc) >= 2:
+            return False
+
+    # Martin finish filter: Natural vs Sunburst on the same Martin model are different
+    # price points — Sunburst commands $300-800 premium on most dreadnoughts and OM models.
+    # Only applies when BOTH sides declare a critical finish keyword.
+    _MARTIN_CRITICAL_FINISHES = {"sunburst", "amberburst", "natural", "black"}
+    if gh_brand == "martin" and us_brand == "martin":
+        def _martin_finish(t: str) -> Optional[str]:
+            tn = normalize_title(t)
+            for f in _MARTIN_CRITICAL_FINISHES:
+                if f in tn:
+                    return f
+            return None
+        mf_a = _martin_finish(gh_effective)
+        mf_b = _martin_finish(us_effective)
+        if mf_a and mf_b and mf_a != mf_b:
             return False
 
     return True
