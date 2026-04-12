@@ -321,8 +321,34 @@ MODERN_YEAR_MIN = 2000    # guitars made from this year onward are considered mo
 # ── Model-tier submodels ──────────────────────────────────────────────────────
 # When both titles declare a tier submodel and they differ, it's a different guitar.
 # "Les Paul Standard" ≠ "Les Paul Studio" — hundreds of USD apart.
+# "Les Paul Custom" ≠ "Les Paul Standard" — different body, binding, fretboard.
 # Keep this set to unambiguous, price-differentiating variants only.
-TIER_SUBMODELS = {"standard", "studio", "classic", "junior", "deluxe", "special"}
+TIER_SUBMODELS = {"standard", "studio", "classic", "junior", "deluxe", "special", "custom"}
+
+# ── Accessory / non-instrument title keywords ─────────────────────────────────
+# Listings for cases, bags, straps, parts — never instruments. Filter at scrape time
+# and inside is_hard_match as a safety net to prevent benchmarking a $800 case
+# against a $4,000 guitar (confirmed false positive: Gretsch hardshell case).
+ACCESSORY_TITLE_KEYWORDS = {
+    "hardshell case", "hard shell case", "gig bag", "case only", "case for",
+    "softcase", "soft case", "strap only", "pickguard only", "neck only",
+    "body only", "pickups only", "pickup only", "parts only", "tuner only",
+    "tremolo only", "bridge only", "hardware only",
+}
+
+# ── Music Man model families ──────────────────────────────────────────────────
+# Each Music Man artist/model line has distinct construction, pickups, and price.
+# Luke (Luke Haller) ≠ Axis (EVH design) ≠ JP (John Petrucci) ≠ Cutlass (vintage S-style).
+# Price gaps: Luke ~$2,500 / Axis ~$3,000 / JP ~$3,500+ / St. Vincent ~$2,000.
+MUSICMAN_MODEL_FAMILIES = {
+    "luke":       ["luke"],
+    "axis":       ["axis"],
+    "jp":         ["jp "],          # trailing space avoids matching "jpc" or partial words
+    "cutlass":    ["cutlass"],
+    "st vincent": ["st vincent", "st. vincent"],
+    "stingray":   ["stingray"],     # bass
+    "sterling":   ["sterling"],     # bass
+}
 
 # ── Finishing type ────────────────────────────────────────────────────────────
 # Custom Shop guitars come in mutually exclusive finishing levels:
@@ -563,6 +589,16 @@ def is_hard_match(gh_title: str, us_title: str,
     # Title-only checks (finish type, artist) still use just the title where noted.
     gh_effective = (gh_title + " " + gh_desc).strip() if gh_desc else gh_title
     us_effective = (us_title + " " + us_desc).strip() if us_desc else us_title
+
+    # Accessory / non-instrument check: cases, bags, parts are never guitars.
+    # A Gretsch hardshell case listing ($800) must never match a White Falcon ($4,156).
+    # Check BOTH sides — neither the benchmark nor the US listing should be an accessory.
+    _us_title_lc = normalize_title(us_effective)
+    _gh_title_lc = normalize_title(gh_effective)
+    if any(kw in _us_title_lc for kw in ACCESSORY_TITLE_KEYWORDS):
+        return False
+    if any(kw in _gh_title_lc for kw in ACCESSORY_TITLE_KEYWORDS):
+        return False
 
     # One of a Kind / signed / numbered check: these guitars have non-replicable pricing.
     # "1-of-1", "one of a kind", "signed by", "23/100" → skip on EITHER side.
@@ -966,6 +1002,63 @@ def is_hard_match(gh_title: str, us_title: str,
         if gh_config and us_config and gh_config != us_config:
             return False
 
+    # Gibson body family check: LP, SG, ES-335, Flying V, Explorer, Firebird are
+    # completely different instruments. A mismatch here means totally wrong guitar.
+    # Confirmed false positive: ES-335 Custom MTM matched against LP Custom Alpine White.
+    _GIBSON_BODY_FAMILIES = {
+        "les paul": {"les paul", "lp"},
+        "sg":       {"sg"},
+        "es-335":   {"es-335", "es335", "es 335"},
+        "es-339":   {"es-339", "es339", "es 339"},
+        "es-345":   {"es-345", "es345"},
+        "es-355":   {"es-355", "es355"},
+        "es-330":   {"es-330", "es330"},
+        "flying v": {"flying v", "flying-v", "flyingv"},
+        "explorer": {"explorer"},
+        "firebird": {"firebird"},
+    }
+    if gh_brand == "gibson" and us_brand == "gibson":
+        def _gibson_body_family(t: str) -> Optional[str]:
+            tn = normalize_title(t)
+            for family, aliases in _GIBSON_BODY_FAMILIES.items():
+                if any(a in tn for a in aliases):
+                    return family
+            return None
+        gbf_a = _gibson_body_family(gh_effective)
+        gbf_b = _gibson_body_family(us_effective)
+        if gbf_a and gbf_b and gbf_a != gbf_b:
+            return False
+
+    # Music Man model family check: Luke ≠ Axis ≠ JP ≠ Cutlass ≠ St. Vincent.
+    # Confirmed false positive: EBMM Axis (EVH design) matched against Luke III (Luke Haller).
+    # Each family has distinct pickups, construction, and price ($500-1,500 gaps).
+    _mm_brands = {"music man", "ernie ball", "ernieball"}
+    if any(b in normalize_title(gh_effective) for b in _mm_brands) and \
+       any(b in normalize_title(us_effective) for b in _mm_brands):
+        def _mm_family(t: str) -> Optional[str]:
+            tn = normalize_title(t)
+            for family, aliases in MUSICMAN_MODEL_FAMILIES.items():
+                if any(a in tn for a in aliases):
+                    return family
+            return None
+        mmf_a = _mm_family(gh_effective)
+        mmf_b = _mm_family(us_effective)
+        if mmf_a and mmf_b and mmf_a != mmf_b:
+            return False
+        # If one side declares a family and the other doesn't, reject (unknown ≠ known)
+        if (mmf_a and not mmf_b) or (mmf_b and not mmf_a):
+            return False
+
+    # PRS SE vs Core check: SE (Korean, ~$500-900) ≠ Core/CE/S2 (USA, ~$1,800-4,000).
+    # Confirmed false positive: PRS SE Custom 22 Semi-Hollow ($799) matched against
+    # PRS CE-24 Semi-Hollow benchmark ($3,463 USD). ~$2,500 of false margin.
+    # The existing S2 filter covers S2 vs Core. This covers SE vs everything else.
+    if gh_brand == "prs" and us_brand == "prs":
+        us_is_se = bool(re.search(r'\bse\b', normalize_title(us_effective)))
+        gh_is_se = bool(re.search(r'\bse\b', normalize_title(gh_effective)))
+        if us_is_se != gh_is_se:
+            return False
+
     # Semi-hollow variant check: guitars that exist in both solid and semi-hollow versions
     # are distinct products with different construction, tone, and price (~$300-500 gap).
     # PRS CE-24 Semi-Hollow ≠ PRS CE-24, Gibson ES-335 Thinline ≠ ES-335, etc.
@@ -1043,7 +1136,9 @@ def is_hard_match(gh_title: str, us_title: str,
             return None
         gh_rc = _gibson_reissue_code(gh_effective)
         us_rc = _gibson_reissue_code(us_effective)
-        if gh_rc and us_rc and abs(gh_rc - us_rc) >= 2:
+        # ANY difference in reissue code = different guitar. R8 (1958) ≠ R9 (1959):
+        # different neck profile, different collector demand, $500-800 price gap.
+        if gh_rc and us_rc and gh_rc != us_rc:
             return False
 
     # Martin finish filter: Natural vs Sunburst on the same Martin model are different
