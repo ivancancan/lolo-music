@@ -393,22 +393,33 @@ def build_liquidity_scores(history: list[dict]) -> dict:
     return scores
 
 
-def get_liquidity(title: str, scores: dict, threshold: int = 70) -> Optional[dict]:
+def get_liquidity(title: str, scores: dict, threshold: int = 70,
+                  ph=None) -> Optional[dict]:
     """
     Look up liquidity score for a given guitar title.
-    Returns the best matching cluster score or None.
+
+    Priority:
+    1. Real GH web sell data (ph.get_gh_liquidity) — actual days-on-market
+    2. Instagram history approximation (scores dict) — fallback when DB has < 2 points
+
+    Returns dict with avg_days_to_sell, sell_rate, count_sold, count_total.
     """
+    # Priority 1: real data from GH web tracking
+    if ph is not None:
+        real = ph.get_gh_liquidity(title)
+        if real is not None:
+            return real
+
+    # Priority 2: Instagram approximation
     if not scores:
         return None
 
     norm = _normalize(title)
     key4 = " ".join(norm.split()[:4])
 
-    # Direct key match first
     if key4 in scores:
         return scores[key4]
 
-    # Fuzzy fallback
     best_score = 0
     best_key   = None
     for k in scores:

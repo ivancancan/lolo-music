@@ -603,6 +603,14 @@ def main() -> None:
     gh_items = scrape_guitarshome()
     print(f"Guitar's Home: {len(gh_items)} guitarras")
 
+    # Track GH listings across runs — detect real sell events (disappeared = sold).
+    # This builds actual days-on-market data instead of Instagram approximations.
+    newly_sold = ph.update_gh_listings(gh_items)
+    if newly_sold:
+        print(f"GH vendidas desde ultimo run: {len(newly_sold)}")
+        for s in newly_sold:
+            print(f"  VENDIDA en {s['days_listed']}d: {s['title'][:60]}")
+
     # Build dynamic Reverb queries from GH titles + proactive targets.
     # This surfaces Reverb listings that the static query list would miss
     # (e.g. "suhr modern plus" when only "suhr modern electric" is in the static list).
@@ -703,7 +711,7 @@ def main() -> None:
             )
             if result:
                 seen_us_urls.add(us_match["url"])
-                liq = get_liquidity(result["gh_title"], liquidity_scores)
+                liq = get_liquidity(result["gh_title"], liquidity_scores, ph=ph)
                 result["liquidity"] = liq
 
                 # Liquidity gate: skip if proven low demand
@@ -824,7 +832,7 @@ def main() -> None:
                     result["very_fresh"] = is_very_fresh
                     seen_us_urls_fresh.add(us_match["url"])
                     seen_us_urls.add(us_match["url"])
-                    liq = get_liquidity(result["gh_title"], liquidity_scores)
+                    liq = get_liquidity(result["gh_title"], liquidity_scores, ph=ph)
                     result["liquidity"] = liq
 
                     if not passes_liquidity_gate(liq, proactive=True):
@@ -911,7 +919,7 @@ def main() -> None:
                     ph              = ph,
                 )
                 if result:
-                    liq = get_liquidity(result["gh_title"], liquidity_scores)
+                    liq = get_liquidity(result["gh_title"], liquidity_scores, ph=ph)
                     result["liquidity"] = liq
 
                     if not passes_liquidity_gate(liq, proactive=True):

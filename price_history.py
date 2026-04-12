@@ -305,3 +305,131 @@ class PriceHistory:
         urls  = self.conn.execute("SELECT COUNT(DISTINCT url) as c FROM observations").fetchone()["c"]
         drops = self.conn.execute("SELECT COUNT(*) as c FROM price_alerts").fetchone()["c"]
         return {"total_observations": total, "unique_listings": urls, "price_drops_detected": drops}
+
+    # ── Guitar's Home listing tracker ─────────────────────────────────────────
+    # Track GH web listings across runs. When a listing disappears → it sold.
+    # This gives us REAL days-on-market for GH instead of Instagram approximations.
+
+    def _init_gh_schema(self) -> None:
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS gh_listings (
+                url         TEXT PRIMARY KEY,
+                title       TEXT NOT NULL,
+                price_mxn   REAL,
+                first_seen  TEXT NOT NULL,
+                last_seen   TEXT NOT NULL,
+                sold_at     TEXT          -- NULL = still active, ISO date = sold
+            );
+
+            CREATE TABLE IF NOT EXISTS gh_sold (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                url         TEXT NOT NULL,
+                title       TEXT NOT NULL,
+                price_mxn   REAL,
+                first_seen  TEXT NOT NULL,
+                sold_at     TEXT NOT NULL,
+                days_listed INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_gh_sold_title ON gh_sold(title);
+        """)
+        self.conn.commit()
+
+    def update_gh_listings(self, gh_items: list[dict]) -> list[dict]:
+        """
+        Call once per pipeline run with the current GH web listings.
+
+        - Inserts new listings (first time seen).
+        - Updates last_seen for listings still active.
+        - Marks missing listings as sold and records real days_listed.
+
+        Returns list of newly-sold guitars: [{"title", "price_mxn", "days_listed"}]
+        """
+        self._init_gh_schema()
+        now = datetime.utcnow().isoformat()
+        today = datetime.utcnow().date()
+
+        current_urls = {item["url"] for item in gh_items if item.get("url")}
+
+        # Upsert active listings
+        for item in gh_items:
+            url = item.get("url", "")
+            if not url:
+                continue
+            title     = item.get("title", "")
+            price_mxn = item.get("price_mxn")
+            existing = self.conn.execute(
+                "SELECT url, first_seen FROM gh_listings WHERE url = ?", (url,)
+            ).fetchone()
+            if existing:
+                self.conn.execute(
+                    "UPDATE gh_listings SET last_seen = ?, price_mxn = ?, sold_at = NULL WHERE url = ?",
+                    (now, price_mxn, url),
+                )
+            else:
+                self.conn.execute(
+                    "INSERT INTO gh_listings (url, title, price_mxn, first_seen, last_seen, sold_at) VALUES (?,?,?,?,?,NULL)",
+                    (url, title, price_mxn, now, now),
+                )
+
+        # Detect sold: active listings (sold_at IS NULL) not in current scrape
+        active_rows = self.conn.execute(
+            "SELECT url, title, price_mxn, first_seen FROM gh_listings WHERE sold_at IS NULL"
+        ).fetchall()
+
+        newly_sold = []
+        for row in active_rows:
+            if row["url"] not in current_urls:
+                first_seen_dt = datetime.fromisoformat(row["first_seen"]).date()
+                days_listed   = (today - first_seen_dt).days
+                self.conn.execute(
+                    "UPDATE gh_listings SET sold_at = ? WHERE url = ?", (now, row["url"])
+                )
+                self.conn.execute(
+                    """INSERT INTO gh_sold (url, title, price_mxn, first_seen, sold_at, days_listed)
+                       VALUES (?,?,?,?,?,?)""",
+                    (row["url"], row["title"], row["price_mxn"],
+                     row["first_seen"], now, days_listed),
+                )
+                newly_sold.append({
+                    "title":       row["title"],
+                    "price_mxn":   row["price_mxn"],
+                    "days_listed": days_listed,
+                })
+
+        self.conn.commit()
+        return newly_sold
+
+    def get_gh_liquidity(self, title: str, threshold: int = 72) -> dict | None:
+        """
+        Return real days-on-market stats for a GH guitar model based on
+        actual sell events (listing disappeared from GH web).
+
+        Falls back to None if fewer than 2 data points — catalog.py will
+        use the Instagram approximation in that case.
+        """
+        self._init_gh_schema()
+        from rapidfuzz import fuzz
+
+        rows = self.conn.execute(
+            "SELECT title, days_listed FROM gh_sold"
+        ).fetchall()
+
+        matches = []
+        for row in rows:
+            score = fuzz.token_set_ratio(title.lower(), row["title"].lower())
+            if score >= threshold:
+                matches.append(row["days_listed"])
+
+        if len(matches) < 2:
+            return None
+
+        avg_days  = sum(matches) / len(matches)
+        sell_rate = 1.0  # every row in gh_sold DID sell — 100% by definition
+        return {
+            "avg_days_to_sell": round(avg_days, 1),
+            "sell_rate":        sell_rate,
+            "count_sold":       len(matches),
+            "count_total":      len(matches),
+            "source":           "gh_web",   # distinguishes from Instagram estimate
+        }
